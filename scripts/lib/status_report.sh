@@ -130,7 +130,7 @@ if cur:
     rules.append(cur)
 
 for r in rules:
-    host = (r.get("hostname") or "").strip()
+    host = (r.get("hostname") or r.get("host") or "").strip()
     svc = (r.get("service") or "").strip()
     if not host or not svc:
         continue
@@ -140,21 +140,58 @@ for r in rules:
 PY
 }
 
-# ingress 의 service(예: http://127.0.0.1:3000)에서 로컬 포트 추출
+# ingress 의 service URL 에서 로컬 포트 추출 (sed 금지: 127.0.0.1 → 잘못된 "1" 방지)
 cloudflare_service_local_port() {
   local svc="${1:-}"
   [[ -n "$svc" ]] || return 1
-  printf '%s' "$svc" | sed -nE 's|.*:([0-9]+)([^0-9].*)?$|\1|p'
+  local out
+  out="$(
+    CF_INGRESS_SVC="$svc" python3 <<'PY'
+import os, urllib.parse
+
+s = (os.environ.get("CF_INGRESS_SVC") or "").strip()
+if not s or "://" not in s:
+    raise SystemExit(1)
+u = urllib.parse.urlparse(s)
+port = u.port
+if port is None:
+    if u.scheme in ("http", "ws"):
+        port = 80
+    elif u.scheme in ("https", "wss"):
+        port = 443
+    else:
+        raise SystemExit(1)
+print(port, end="")
+PY
+  )" || return 1
+  [[ -n "$out" ]] || return 1
+  printf '%s' "$out"
+}
+
+# config ingress 에 나온 로컬 포트들 (중복 제거, 쉼표 구분) — 안내용
+cloudflare_config_ingress_local_ports_unique_csv() {
+  local ports="" lp
+  while IFS=$'\t' read -r _h s || [[ -n "$_h" ]]; do
+    [[ -z "$_h" ]] && continue
+    lp="$(cloudflare_service_local_port "$s" 2>/dev/null)" || continue
+    [[ "$lp" =~ ^[0-9]+$ ]] || continue
+    case ",$ports," in
+      *",$lp,"*) ;;
+      *) ports="${ports:+$ports,}$lp" ;;
+    esac
+  done < <(cloudflare_config_ingress_pairs)
+  printf '%s' "$ports"
 }
 
 # stdout: 해당 포트로 연결된 hostname 한 줄씩 (중복 제거)
 cloudflare_hostnames_for_port() {
   local want="${1:-}"
+  want="${want// /}"
   [[ "$want" =~ ^[0-9]+$ ]] || return 0
   local h s lp seen=""
   while IFS=$'\t' read -r h s || [[ -n "$h" ]]; do
     [[ -z "$h" ]] && continue
-    lp="$(cloudflare_service_local_port "$s")"
+    lp="$(cloudflare_service_local_port "$s" 2>/dev/null)" || continue
     [[ "$lp" == "$want" ]] || continue
     case "$seen" in
       *" ${h} "*) continue ;;
@@ -218,21 +255,16 @@ discover_workspace_paths() {
 # 이 작업 폴더에 대한 Cursor 워커 상태 (plist · 프로세스 · CLI 상태파일)
 worker_status_detail_for_workspace() {
   local ws="$1"
-  local ws_r plist pw
+  local ws_r plist lb
   ws_r=$(realpath_dir "$ws")
-  plist="$HOME/Library/LaunchAgents/com.cursor.agent.worker.plist"
 
-  if [[ -f "$plist" ]]; then
-    pw=$(plutil_string "$plist" WorkingDirectory)
-    if dirs_same "$pw" "$ws"; then
-      if launchagent_running "com.cursor.agent.worker" || cursor_worker_process_running; then
-        printf '%s\n' "워커 · 이 폴더 · 실행 중"
-      else
-        printf '%s\n' "워커 · 이 폴더 · 중지"
-      fi
-      return 0
+  if plist=$(cursor_agent_worker_plist_path_for_workspace "$ws" 2>/dev/null); then
+    lb=$(plutil_string "$plist" Label)
+    if launchagent_running "$lb"; then
+      printf '%s\n' "워커 · 이 폴더 · 실행 중"
+    else
+      printf '%s\n' "워커 · 이 폴더 · 중지"
     fi
-    printf '%s\n' "워커 · 다른 폴더 ($pw)"
     return 0
   fi
 
@@ -285,11 +317,16 @@ status_dashboard_compact_for_dialog() {
     ag_ko="미설치"
   fi
 
-  if [[ -f "$HOME/Library/LaunchAgents/com.cursor.agent.worker.plist" ]]; then
-    if launchagent_running "com.cursor.agent.worker"; then
-      wk_ko="워커 실행 중"
+  local _wreg _wrun
+  _wreg=$(cursor_agent_worker_registered_count)
+  _wrun=$(cursor_agent_worker_running_count)
+  if [[ "$_wreg" -gt 0 ]]; then
+    if [[ "$_wrun" -eq "$_wreg" ]]; then
+      wk_ko="워커 ${_wreg}개 모두 실행 중"
+    elif [[ "$_wrun" -gt 0 ]]; then
+      wk_ko="워커 등록 ${_wreg} · 실행 ${_wrun}"
     else
-      wk_ko="워커 등록됨(멈춤)"
+      wk_ko="워커 등록 ${_wreg}개(멈춤)"
     fi
   elif cursor_worker_process_running; then
     wk_ko="프로세스만 실행 중"
@@ -365,17 +402,21 @@ status_dashboard_print() {
   [[ -n "$repo_hint" ]] && printf '  %-22s %s\n' "저장소 이름(참고)" "$repo_hint"
 
   printf '\n%s\n' "■ Cursor 워커 (LaunchAgent)"
-  local p_worker="$HOME/Library/LaunchAgents/com.cursor.agent.worker.plist"
-  if [[ -f "$p_worker" ]]; then
-    local wd
-    wd=$(plutil_string "$p_worker" WorkingDirectory)
-    printf '  %-22s %s\n' "등록 plist" "있음"
-    printf '  %-22s %s\n' "작업 디렉터리" "${wd:-?}"
-    if launchagent_running "com.cursor.agent.worker"; then
-      printf '  %-22s %s\n' "실행" "동작 중"
-    else
-      printf '  %-22s %s\n' "실행" "멈춤/미기동"
-    fi
+  local p_worker wd lb _wl
+  _wl=$(cursor_agent_worker_list_plists)
+  if [[ -n "$_wl" ]]; then
+    printf '  %-22s %s\n' "등록 수" "$(cursor_agent_worker_registered_count) plist"
+    while IFS= read -r p_worker; do
+      [[ -z "$p_worker" ]] && continue
+      wd=$(plutil_string "$p_worker" WorkingDirectory)
+      lb=$(plutil_string "$p_worker" Label)
+      printf '  %-22s %s\n' "$lb" "${wd:-?}"
+      if launchagent_running "$lb"; then
+        printf '  %-22s %s\n' "  └ 실행" "동작 중"
+      else
+        printf '  %-22s %s\n' "  └ 실행" "멈춤/미기동"
+      fi
+    done <<<"$_wl"
   else
     printf '  %-22s %s\n' "LaunchAgent" "미등록"
   fi

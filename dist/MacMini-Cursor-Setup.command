@@ -190,6 +190,65 @@ dirs_same() {
   return 1
 }
 
+# 실경로 기준 12자 hex — 폴더마다 별도 LaunchAgent 라벨에 사용
+cursor_agent_worker_suffix_for_path() {
+  local rp="${1:-}"
+  [[ -n "$rp" ]] || return 1
+  rp=$(expand_tilde "$rp")
+  if ! rp=$(cd "$rp" 2>/dev/null && pwd -P); then
+    rp=$(realpath_dir "$rp" 2>/dev/null) || return 1
+  fi
+  [[ -n "$rp" ]] || return 1
+  printf '%s' "$rp" | shasum -a 256 2>/dev/null | awk '{print substr($1,1,12)}'
+}
+
+cursor_agent_worker_label_for_path() {
+  local suf
+  suf="$(cursor_agent_worker_suffix_for_path "$1")" || return 1
+  printf 'com.cursor.agent.worker.%s\n' "$suf"
+}
+
+# LaunchAgents 안의 Cursor worker plist 한 줄씩 (레거시 단일 + 경로별)
+cursor_agent_worker_list_plists() {
+  shopt -s nullglob
+  local f
+  for f in "$HOME/Library/LaunchAgents"/com.cursor.agent.worker.plist "$HOME/Library/LaunchAgents"/com.cursor.agent.worker.*.plist; do
+    [[ -f "$f" ]] || continue
+    printf '%s\n' "$f"
+  done
+  shopt -u nullglob
+}
+
+cursor_agent_worker_plist_path_for_workspace() {
+  local ws="$1" wf pw
+  ws=$(realpath_dir "$ws")
+  while IFS= read -r wf; do
+    [[ -z "$wf" ]] && continue
+    pw=$(plutil_string "$wf" WorkingDirectory)
+    dirs_same "$pw" "$ws" && { printf '%s\n' "$wf"; return 0; }
+  done < <(cursor_agent_worker_list_plists)
+  return 1
+}
+
+cursor_agent_worker_registered_count() {
+  local n=0 wf
+  while IFS= read -r wf; do
+    [[ -n "$wf" ]] && n=$((n + 1))
+  done < <(cursor_agent_worker_list_plists)
+  printf '%s\n' "$n"
+}
+
+cursor_agent_worker_running_count() {
+  local n=0 wf lb
+  while IFS= read -r wf; do
+    [[ -z "$wf" ]] && continue
+    lb=$(plutil_string "$wf" Label)
+    [[ -n "$lb" ]] || continue
+    launchagent_running "$lb" && n=$((n + 1))
+  done < <(cursor_agent_worker_list_plists)
+  printf '%s\n' "$n"
+}
+
 cursor_worker_process_running() {
   pgrep -f 'agent.*worker' >/dev/null 2>&1 || pgrep -f '/agent worker' >/dev/null 2>&1
 }
@@ -346,7 +405,7 @@ if cur:
     rules.append(cur)
 
 for r in rules:
-    host = (r.get("hostname") or "").strip()
+    host = (r.get("hostname") or r.get("host") or "").strip()
     svc = (r.get("service") or "").strip()
     if not host or not svc:
         continue
@@ -356,21 +415,58 @@ for r in rules:
 PY
 }
 
-# ingress 의 service(예: http://127.0.0.1:3000)에서 로컬 포트 추출
+# ingress 의 service URL 에서 로컬 포트 추출 (sed 금지: 127.0.0.1 → 잘못된 "1" 방지)
 cloudflare_service_local_port() {
   local svc="${1:-}"
   [[ -n "$svc" ]] || return 1
-  printf '%s' "$svc" | sed -nE 's|.*:([0-9]+)([^0-9].*)?$|\1|p'
+  local out
+  out="$(
+    CF_INGRESS_SVC="$svc" python3 <<'PY'
+import os, urllib.parse
+
+s = (os.environ.get("CF_INGRESS_SVC") or "").strip()
+if not s or "://" not in s:
+    raise SystemExit(1)
+u = urllib.parse.urlparse(s)
+port = u.port
+if port is None:
+    if u.scheme in ("http", "ws"):
+        port = 80
+    elif u.scheme in ("https", "wss"):
+        port = 443
+    else:
+        raise SystemExit(1)
+print(port, end="")
+PY
+  )" || return 1
+  [[ -n "$out" ]] || return 1
+  printf '%s' "$out"
+}
+
+# config ingress 에 나온 로컬 포트들 (중복 제거, 쉼표 구분) — 안내용
+cloudflare_config_ingress_local_ports_unique_csv() {
+  local ports="" lp
+  while IFS=$'\t' read -r _h s || [[ -n "$_h" ]]; do
+    [[ -z "$_h" ]] && continue
+    lp="$(cloudflare_service_local_port "$s" 2>/dev/null)" || continue
+    [[ "$lp" =~ ^[0-9]+$ ]] || continue
+    case ",$ports," in
+      *",$lp,"*) ;;
+      *) ports="${ports:+$ports,}$lp" ;;
+    esac
+  done < <(cloudflare_config_ingress_pairs)
+  printf '%s' "$ports"
 }
 
 # stdout: 해당 포트로 연결된 hostname 한 줄씩 (중복 제거)
 cloudflare_hostnames_for_port() {
   local want="${1:-}"
+  want="${want// /}"
   [[ "$want" =~ ^[0-9]+$ ]] || return 0
   local h s lp seen=""
   while IFS=$'\t' read -r h s || [[ -n "$h" ]]; do
     [[ -z "$h" ]] && continue
-    lp="$(cloudflare_service_local_port "$s")"
+    lp="$(cloudflare_service_local_port "$s" 2>/dev/null)" || continue
     [[ "$lp" == "$want" ]] || continue
     case "$seen" in
       *" ${h} "*) continue ;;
@@ -434,21 +530,16 @@ discover_workspace_paths() {
 # 이 작업 폴더에 대한 Cursor 워커 상태 (plist · 프로세스 · CLI 상태파일)
 worker_status_detail_for_workspace() {
   local ws="$1"
-  local ws_r plist pw
+  local ws_r plist lb
   ws_r=$(realpath_dir "$ws")
-  plist="$HOME/Library/LaunchAgents/com.cursor.agent.worker.plist"
 
-  if [[ -f "$plist" ]]; then
-    pw=$(plutil_string "$plist" WorkingDirectory)
-    if dirs_same "$pw" "$ws"; then
-      if launchagent_running "com.cursor.agent.worker" || cursor_worker_process_running; then
-        printf '%s\n' "워커 · 이 폴더 · 실행 중"
-      else
-        printf '%s\n' "워커 · 이 폴더 · 중지"
-      fi
-      return 0
+  if plist=$(cursor_agent_worker_plist_path_for_workspace "$ws" 2>/dev/null); then
+    lb=$(plutil_string "$plist" Label)
+    if launchagent_running "$lb"; then
+      printf '%s\n' "워커 · 이 폴더 · 실행 중"
+    else
+      printf '%s\n' "워커 · 이 폴더 · 중지"
     fi
-    printf '%s\n' "워커 · 다른 폴더 ($pw)"
     return 0
   fi
 
@@ -501,11 +592,16 @@ status_dashboard_compact_for_dialog() {
     ag_ko="미설치"
   fi
 
-  if [[ -f "$HOME/Library/LaunchAgents/com.cursor.agent.worker.plist" ]]; then
-    if launchagent_running "com.cursor.agent.worker"; then
-      wk_ko="워커 실행 중"
+  local _wreg _wrun
+  _wreg=$(cursor_agent_worker_registered_count)
+  _wrun=$(cursor_agent_worker_running_count)
+  if [[ "$_wreg" -gt 0 ]]; then
+    if [[ "$_wrun" -eq "$_wreg" ]]; then
+      wk_ko="워커 ${_wreg}개 모두 실행 중"
+    elif [[ "$_wrun" -gt 0 ]]; then
+      wk_ko="워커 등록 ${_wreg} · 실행 ${_wrun}"
     else
-      wk_ko="워커 등록됨(멈춤)"
+      wk_ko="워커 등록 ${_wreg}개(멈춤)"
     fi
   elif cursor_worker_process_running; then
     wk_ko="프로세스만 실행 중"
@@ -581,17 +677,21 @@ status_dashboard_print() {
   [[ -n "$repo_hint" ]] && printf '  %-22s %s\n' "저장소 이름(참고)" "$repo_hint"
 
   printf '\n%s\n' "■ Cursor 워커 (LaunchAgent)"
-  local p_worker="$HOME/Library/LaunchAgents/com.cursor.agent.worker.plist"
-  if [[ -f "$p_worker" ]]; then
-    local wd
-    wd=$(plutil_string "$p_worker" WorkingDirectory)
-    printf '  %-22s %s\n' "등록 plist" "있음"
-    printf '  %-22s %s\n' "작업 디렉터리" "${wd:-?}"
-    if launchagent_running "com.cursor.agent.worker"; then
-      printf '  %-22s %s\n' "실행" "동작 중"
-    else
-      printf '  %-22s %s\n' "실행" "멈춤/미기동"
-    fi
+  local p_worker wd lb _wl
+  _wl=$(cursor_agent_worker_list_plists)
+  if [[ -n "$_wl" ]]; then
+    printf '  %-22s %s\n' "등록 수" "$(cursor_agent_worker_registered_count) plist"
+    while IFS= read -r p_worker; do
+      [[ -z "$p_worker" ]] && continue
+      wd=$(plutil_string "$p_worker" WorkingDirectory)
+      lb=$(plutil_string "$p_worker" Label)
+      printf '  %-22s %s\n' "$lb" "${wd:-?}"
+      if launchagent_running "$lb"; then
+        printf '  %-22s %s\n' "  └ 실행" "동작 중"
+      else
+        printf '  %-22s %s\n' "  └ 실행" "멈춤/미기동"
+      fi
+    done <<<"$_wl"
   else
     printf '  %-22s %s\n' "LaunchAgent" "미등록"
   fi
@@ -791,7 +891,7 @@ workspace_listen_map_build() {
   _ws_paths=$(mktemp)
   cat > "$_ws_paths"
   LISTEN_JSON_OUT="$dest" WS_PATHS_FILE="$_ws_paths" python3 <<'PY'
-import json, os, subprocess, sys
+import hashlib, json, os, subprocess, sys, time
 
 def lsof_listen_rows():
     r = subprocess.run(
@@ -1204,6 +1304,50 @@ else:
         except OSError:
             continue
 paths = list(dict.fromkeys(paths))
+
+
+def _listen_cache_ttl():
+    try:
+        v = float(os.environ.get("CURSOR_DASH_LISTEN_CACHE_SEC", "2.5"))
+    except (TypeError, ValueError):
+        return 2.5
+    return max(0.0, v)
+
+
+def _listen_cache_key(ps):
+    h = hashlib.sha256()
+    for p in sorted(ps):
+        h.update(p.encode("utf-8", errors="replace"))
+        h.update(b"\0")
+    h.update((os.environ.get("CURSOR_DASH_PORT") or "").encode("utf-8"))
+    h.update(b"\0")
+    h.update((os.environ.get("CURSOR_SETUP_ROOT") or "").encode("utf-8"))
+    return h.hexdigest()
+
+
+_listen_ttl = _listen_cache_ttl()
+_outp_pre = os.environ.get("LISTEN_JSON_OUT", "")
+if _outp_pre and _listen_ttl > 0 and paths:
+    _ck = _listen_cache_key(paths)
+    _cp = os.path.join(os.path.expanduser("~"), ".cursor-setup", ".dash-listen-cache.json")
+    _now = time.time()
+    try:
+        if os.path.isfile(_cp):
+            with open(_cp, encoding="utf-8") as _cfp:
+                _cj = json.load(_cfp)
+            if (
+                isinstance(_cj, dict)
+                and _cj.get("k") == _ck
+                and isinstance(_cj.get("t"), (int, float))
+                and _now - float(_cj["t"]) < _listen_ttl
+                and isinstance(_cj.get("r"), dict)
+            ):
+                with open(_outp_pre, "w", encoding="utf-8") as _ofp:
+                    json.dump(_cj["r"], _ofp, ensure_ascii=False)
+                sys.exit(0)
+    except Exception:
+        pass
+
 exec_hints = load_ws_exec_hints(paths)
 listen = lsof_listen_rows()
 pid_to_ports = {}
@@ -1271,6 +1415,19 @@ for ws in paths:
     result[ws] = sorted(set(result[ws]))
 outp = os.environ.get("LISTEN_JSON_OUT", "")
 if outp:
+    if _listen_ttl > 0 and paths:
+        try:
+            _cdir = os.path.join(os.path.expanduser("~"), ".cursor-setup")
+            os.makedirs(_cdir, exist_ok=True)
+            _cpw = os.path.join(_cdir, ".dash-listen-cache.json")
+            with open(_cpw, "w", encoding="utf-8") as _cfp:
+                json.dump(
+                    {"k": _listen_cache_key(paths), "t": time.time(), "r": result},
+                    _cfp,
+                    ensure_ascii=False,
+                )
+        except Exception:
+            pass
     with open(outp, "w", encoding="utf-8") as fp:
         json.dump(result, fp, ensure_ascii=False)
 PY
@@ -1355,19 +1512,26 @@ dashboard_global_cards_html() {
     _dashboard_card "warn" "Cursor Agent" "$(_d "CLI 미설치" "CLI not installed")" "~/.local/bin/agent"
   fi
 
-  if [[ -f "$HOME/Library/LaunchAgents/com.cursor.agent.worker.plist" ]]; then
-    local pwd pwdb
-    pwd=$(plutil_string "$HOME/Library/LaunchAgents/com.cursor.agent.worker.plist" WorkingDirectory)
-    pwdb=$(basename "$(expand_tilde "$pwd")")
-    if launchagent_running "com.cursor.agent.worker"; then
-      _dashboard_card "ok" "$(_d "Cursor 워커 (전역)" "Cursor worker (global)")" "$(_d "LaunchAgent 동작 중" "LaunchAgent running")" "$(_d "폴더" "Folder") · $pwdb"
+  local _wr _wrun _wdot _wbody _wextra
+  _wr=$(cursor_agent_worker_registered_count)
+  _wrun=$(cursor_agent_worker_running_count)
+  if [[ "$_wr" -gt 0 ]]; then
+    if [[ "$_wrun" -eq "$_wr" ]]; then
+      _wdot="ok"
+      _wbody="$(_d "등록 ${_wr}개 모두 실행 중" "All ${_wr} registered workers running")"
+    elif [[ "$_wrun" -gt 0 ]]; then
+      _wdot="warn"
+      _wbody="$(_d "등록 ${_wr}개 · 실행 ${_wrun}개" "${_wrun} of ${_wr} workers running")"
     else
-      _dashboard_card "warn" "$(_d "Cursor 워커 (전역)" "Cursor worker (global)")" "$(_d "plist 있음 · 지금 멈춤" "plist present · stopped")" "$(_d "폴더" "Folder") · $pwdb"
+      _wdot="warn"
+      _wbody="$(_d "등록 ${_wr}개 · 모두 멈춤" "${_wr} registered · all stopped")"
     fi
+    _wextra="$(_d "폴더마다 plist (재시작 시 전체 kickstart)" "One plist per folder · Restart kicks all")"
+    _dashboard_card "$_wdot" "$(_d "Cursor 워커" "Cursor workers")" "$_wbody" "$_wextra"
   elif cursor_worker_process_running; then
-    _dashboard_card "warn" "$(_d "Cursor 워커 (전역)" "Cursor worker (global)")" "$(_d "프로세스만 실행 중" "Process only")" "$(_d "LaunchAgent 없음" "No LaunchAgent")"
+    _dashboard_card "warn" "$(_d "Cursor 워커" "Cursor workers")" "$(_d "프로세스만 실행 중" "Process only")" "$(_d "LaunchAgent 없음" "No LaunchAgent")"
   else
-    _dashboard_card "bad" "$(_d "Cursor 워커 (전역)" "Cursor worker (global)")" "$(_d "미등록" "Not registered")" ""
+    _dashboard_card "bad" "$(_d "Cursor 워커" "Cursor workers")" "$(_d "미등록" "Not registered")" "$(_d "프로젝트 카드에서 셋업" "Set up from a project card")"
   fi
 
   if [[ -f "$HOME/Library/LaunchAgents/com.cloudflared.tunnel.plist" ]]; then
@@ -1429,27 +1593,12 @@ workspace_gap_hint_for_path() {
     hints="${hints}${sep}$(_d "gh 로그인" "gh sign-in")"
     sep=" · "
   fi
-  local plist pw
-  plist="$HOME/Library/LaunchAgents/com.cursor.agent.worker.plist"
-  if [[ -f "$plist" ]]; then
-    pw=$(plutil_string "$plist" WorkingDirectory)
-    if dirs_same "$pw" "$ws"; then
-      if ! launchagent_running "com.cursor.agent.worker" && ! cursor_worker_process_running; then
-        hints="${hints}${sep}$(_d "워커 기동" "Start worker")"
-        sep=" · "
-      fi
-    else
-      local _wres _wbn
-      _wres=$(expand_tilde "$pw")
-      _wres=$(cd "$_wres" 2>/dev/null && pwd -P || printf '%s' "$_wres")
-      _wbn=$(basename "$_wres")
-      # 워커가 이미 떠 있으면 «다른 폴더»는 정상(멀티 프로젝트)일 수 있음 → 상단 미완료 배너에 넣지 않음
-      if launchagent_running "com.cursor.agent.worker" || cursor_worker_process_running; then
-        :
-      else
-        hints="${hints}${sep}$(_d "워커가 「${_wbn}」를 가리킴 — 이 폴더로 설정" "Worker points at 「${_wbn}」 — configure for this folder")"
-        sep=" · "
-      fi
+  local pf lb
+  if pf=$(cursor_agent_worker_plist_path_for_workspace "$ws" 2>/dev/null); then
+    lb=$(plutil_string "$pf" Label)
+    if ! launchagent_running "$lb"; then
+      hints="${hints}${sep}$(_d "워커 기동" "Start worker")"
+      sep=" · "
     fi
   else
     hints="${hints}${sep}$(_d "워커 등록" "Register worker")"
@@ -1469,9 +1618,9 @@ dashboard_global_actions_html() {
   printf '    </div>\n'
 }
 
-# 접힌 요약 줄: Tunnel · GitHub · Agent · 워커 네 가지 동그라미
+# 접힌 요약 줄: 항목마다 동그라미+라벨 (CURSOR_DASH_LANG 한 벌만)
 dashboard_quick_check_summary_html() {
-  local d_cf d_gh d_ag d_wk
+  local d_cf d_gh d_ag d_wk lb_cf lb_gh lb_ag lb_wk
   if cloudflare_looks_connected; then d_cf=ok; else d_cf=bad; fi
   if github_cli_logged_in; then d_gh=ok; else d_gh=bad; fi
   if [[ -x "$HOME/.local/bin/agent" ]]; then
@@ -1479,39 +1628,42 @@ dashboard_quick_check_summary_html() {
   else
     d_ag=bad
   fi
-  if [[ -f "$HOME/Library/LaunchAgents/com.cursor.agent.worker.plist" ]]; then
-    if launchagent_running "com.cursor.agent.worker"; then d_wk=ok; else d_wk=warn; fi
+  local _wreg _wrun
+  _wreg=$(cursor_agent_worker_registered_count)
+  _wrun=$(cursor_agent_worker_running_count)
+  if [[ "$_wreg" -gt 0 ]]; then
+    if [[ "$_wrun" -eq "$_wreg" ]]; then d_wk=ok; elif [[ "$_wrun" -gt 0 ]]; then d_wk=warn; else d_wk=warn; fi
   elif cursor_worker_process_running; then
     d_wk=warn
   else
     d_wk=bad
   fi
-  printf '      <span class="qc-mid">\n'
-  printf '        <span class="qc-dots" role="presentation" aria-hidden="true">\n'
-  printf '          <span class="dot %s" title="%s"></span>\n' "$d_cf" "$(_d "Tunnel" "Tunnel")"
-  printf '          <span class="dot %s" title="%s"></span>\n' "$d_gh" "$(_d "GitHub" "GitHub")"
-  printf '          <span class="dot %s" title="%s"></span>\n' "$d_ag" "$(_d "Agent CLI" "Agent CLI")"
-  printf '          <span class="dot %s" title="%s"></span>\n' "$d_wk" "$(_d "워커" "Worker")"
-  printf '        </span>\n'
-  printf '        <span class="qc-legend" aria-hidden="true">%s · GitHub · %s · %s</span>\n' \
-    "$(_d "터널" "Tunnel")" "$(_d "Agent CLI" "Agent CLI")" "$(_d "워커" "Worker")"
-  printf '      </span>\n'
+  lb_cf="$(_d "터널" "Tunnel")"
+  lb_gh="GitHub"
+  lb_ag="$(_d "Agent CLI" "Agent CLI")"
+  lb_wk="$(_d "워커" "Worker")"
   printf '      <span class="qc-title">%s</span>\n' "$(_d "빠른 점검" "Quick check")"
+  printf '      <span class="qc-pairs" role="list">\n'
+  printf '        <span class="qc-pair" role="listitem"><span class="dot %s"></span><span class="qc-lbl">%s</span></span>\n' "$d_cf" "$(html_escape "$lb_cf")"
+  printf '        <span class="qc-pair" role="listitem"><span class="dot %s"></span><span class="qc-lbl">%s</span></span>\n' "$d_gh" "$(html_escape "$lb_gh")"
+  printf '        <span class="qc-pair" role="listitem"><span class="dot %s"></span><span class="qc-lbl">%s</span></span>\n' "$d_ag" "$(html_escape "$lb_ag")"
+  printf '        <span class="qc-pair" role="listitem"><span class="dot %s"></span><span class="qc-lbl">%s</span></span>\n' "$d_wk" "$(html_escape "$lb_wk")"
+  printf '      </span>\n'
   printf '      <span class="qc-chev" aria-hidden="true">▸</span>\n'
 }
 
-# $1 출력 파일 — 빠른 점검 요약을 KO/EN 두 벌 넣어 언어 전환 시 전체 HTML 재생성 없이 바꿀 수 있게 함
-_dashboard_quick_check_dual_to_file() {
+# $1 출력 파일 — KO/EN 각각 한 벌 (hidden 은 [data-dash-locale][hidden] 로만 숨김; flex 클래스가 hidden 을 덮어쓰지 않게 .qc-lang-block 사용)
+_dashboard_quick_check_summary_write_file() {
   local dest="${1:?}"
   {
-    printf '<div class="dash-locale qc-summary-locale"'
+    printf '<div class="qc-lang-block" data-dash-locale="ko"'
     is_dash_en && printf ' hidden'
-    printf ' data-dash-locale="ko">\n'
+    printf '>\n'
     CURSOR_DASH_LANG=ko dashboard_quick_check_summary_html
     printf '</div>\n'
-    printf '<div class="dash-locale qc-summary-locale"'
+    printf '<div class="qc-lang-block" data-dash-locale="en"'
     is_dash_en || printf ' hidden'
-    printf ' data-dash-locale="en">\n'
+    printf '>\n'
     CURSOR_DASH_LANG=en dashboard_quick_check_summary_html
     printf '</div>\n'
   } > "$dest"
@@ -1526,15 +1678,15 @@ _dashboard_sidebar_locale_body_html() {
   _setup_bn=$(basename "$setup_ex")
   _db="${CURSOR_DASH_BRAND:-$(_d "Cursor 셋업" "Cursor Setup")}"
   printf '<div class="brand">%s</div>\n' "$(html_escape "$_db")"
-  printf '<p class="sidebar-tag">%s</p>\n' "$(_d "위에서부터 순서대로 진행하세요." "Go through the steps from the top.")"
+  printf '<p class="sidebar-tag">%s</p>\n' "$(_d "위에서 아래로 순서대로 하세요." "Follow the steps from top to bottom.")"
   printf '<div class="sidebar-steps">\n'
   printf '      <div class="step-card">\n'
   printf '        <div class="step-label"><span class="step-num">%s</span>%s</div>\n' "$_sn" "$(_d "개발·프로젝트 폴더" "Dev & project folders")"
-  printf '        <p class="step-desc">%s</p>\n' "$(_d "Finder로 상위 폴더를 추가합니다. workspaces.txt에는 한 줄에 경로 하나 — 여러 상위 폴더를 쓰려면 줄을 더 적으면 됩니다." "Add parent folders in Finder. In workspaces.txt use one path per line — add more lines for multiple parent folders.")"
-  printf '        <form method="post" action="/workspace-add-folder" class="choice-form"><button type="submit" class="btn-choice"><span class="btn-choice-main"><span>%s</span><span class="btn-choice-sub">%s</span></span><span class="chev">›</span></button></form>\n' "$(_d "Finder에서 폴더 추가" "Add folder in Finder")" "workspaces.txt"
+  printf '        <p class="step-desc">%s</p>\n' "$(_d "Finder에서 작업할 폴더를 추가하세요." "Add the folders you work in via Finder.")"
+  printf '        <form method="post" action="/workspace-add-folder" class="choice-form"><button type="submit" class="btn-choice"><span class="btn-choice-main"><span>%s</span><span class="btn-choice-sub">%s</span></span><span class="chev">›</span></button></form>\n' "$(_d "Finder에서 폴더 추가" "Add folder in Finder")" ""
   printf '        <details class="step-advanced">\n'
   printf '          <summary>%s</summary>\n' "$(_d "고급: 파일로 편집" "Advanced: edit config files")"
-  printf '        <form method="post" action="/action/open-user-workspaces" class="choice-form"><button type="submit" class="btn-choice"><span class="btn-choice-main"><span>%s</span><span class="btn-choice-sub">workspaces.txt</span></span><span class="chev">›</span></button></form>\n' "$(_d "폴더 목록 편집" "Edit folder list")"
+  printf '        <form method="post" action="/action/open-user-workspaces" class="choice-form"><button type="submit" class="btn-choice"><span class="btn-choice-main"><span>%s</span><span class="btn-choice-sub">%s</span></span><span class="chev">›</span></button></form>\n' "$(_d "폴더 목록 편집" "Edit folder list")" ""
   printf '        <form method="post" action="/action/open-user-services-jsonl" class="choice-form"><button type="submit" class="btn-choice"><span class="btn-choice-main"><span>%s</span><span class="btn-choice-sub">workspace-services.jsonl</span></span><span class="chev">›</span></button></form>\n' "$(_d "실행·포트" "Run / port")"
   printf '        <form method="post" action="/action/open-cloudflared-config" class="choice-form"><button type="submit" class="btn-choice"><span class="btn-choice-main"><span>%s</span><span class="btn-choice-sub">~/.cloudflared/config.yml</span></span><span class="chev">›</span></button></form>\n' "$(_d "Tunnel 설정" "Tunnel config")"
   printf '        </details>\n'
@@ -1542,16 +1694,16 @@ _dashboard_sidebar_locale_body_html() {
   _sn=$((_sn + 1))
   printf '      <div class="step-card">\n'
   printf '        <div class="step-label"><span class="step-num">%s</span>%s</div>\n' "$_sn" "$(_d "터널·GitHub·Agent" "Tunnel, GitHub, Agent")"
-  printf '        <p class="step-desc">%s</p>\n' "$(_d "전체 설치 마법사를 Finder에서 엽니다. 이미 끝났으면 건너뛰어도 됩니다." "Opens the full setup wizard in Finder. Skip if you already finished.")"
+  printf '        <p class="step-desc">%s</p>\n' "$(_d "설치 마법사를 실행합니다. 이미 끝냈으면 건너뛰어도 됩니다." "Run the setup wizard. Skip if you already finished.")"
   printf '        <form method="post" action="/launch-setup" class="choice-form"><button type="submit" class="btn-choice"><span class="btn-choice-main"><span>%s</span><span class="btn-choice-sub mono">%s</span></span><span class="chev">›</span></button></form>\n' "$(_d "셋업 스크립트 실행" "Run setup script")" "$(html_escape "$_setup_bn")"
   printf '      </div>\n'
   _sn=$((_sn + 1))
   if [[ -n "$dash_port" ]]; then
     printf '      <div class="step-card">\n'
     printf '        <div class="step-label"><span class="step-num">%s</span>%s</div>\n' "$_sn" "$(_d "이 대시보드" "This dashboard")"
-    printf '        <p class="step-desc">%s</p>\n' "$(_d "같은 주소로 다시 들어올 수 있습니다. 모두 끝났으면 로컬 서버를 꺼도 됩니다." "You can open this address again later. Stop the local server when you are done.")"
+    printf '        <p class="step-desc">%s</p>\n' "$(_d "같은 주소로 다시 열 수 있습니다. 끝나면 서버를 꺼도 됩니다." "You can reopen this address anytime. Stop the server when you are done.")"
     printf '        <p style="margin:0 0 8px;font-size:12px"><a class="side-dash-url mono" href="http://127.0.0.1:%s/">127.0.0.1:%s</a></p>\n' "$(html_escape "$dash_port")" "$(html_escape "$dash_port")"
-    printf '        <form method="post" action="/dashboard-stop" class="choice-form"><button type="submit" class="btn-choice"><span class="btn-choice-main"><span>%s</span><span class="btn-choice-sub">%s</span></span><span class="chev">›</span></button></form>\n' "$(_d "대시보드 서버 끄기" "Stop dashboard server")" "$(_d "탭은 그대로 둬도 됩니다" "This tab can stay open")"
+    printf '        <form method="post" action="/dashboard-stop" class="choice-form"><button type="submit" class="btn-choice"><span class="btn-choice-main"><span>%s</span><span class="btn-choice-sub">%s</span></span><span class="chev">›</span></button></form>\n' "$(_d "대시보드 서버 끄기" "Stop dashboard server")" ""
     printf '      </div>\n'
   fi
   printf '</div>\n'
@@ -1640,29 +1792,29 @@ dashboard_global_cards_html_interactive() {
   printf '      </div>\n'
 
   printf '      <div class="card card-setup">\n'
-  if [[ -f "$HOME/Library/LaunchAgents/com.cursor.agent.worker.plist" ]]; then
-    local pwd pwdb
-    pwd=$(plutil_string "$HOME/Library/LaunchAgents/com.cursor.agent.worker.plist" WorkingDirectory)
-    pwdb=$(basename "$(expand_tilde "$pwd")")
-    if launchagent_running "com.cursor.agent.worker"; then
-      printf '        <div class="card-h"><span class="dot ok"></span>%s</div>\n' "$(_d "워커" "Worker")"
-      printf '        <p class="card-lead ok">%s</p>\n' "$(_d "실행 중" "Running")"
-      printf '        <p class="card-sub"><span class="path-chip mono" title="%s">%s · %s</span></p>\n' "$(html_escape "$pwd")" "$(_d "작업 폴더" "Working folder")" "$(html_escape "$pwdb")"
-      printf '        <div class="card-actions">\n'
-      printf '          <form method="post" action="/action/worker-kickstart"><button type="submit" class="btn btn-secondary btn-small btn-pill">%s</button></form>\n' "$(_d "재시작" "Restart")"
-      printf '        </div>\n'
+  local _wr _wrun _wdot
+  _wr=$(cursor_agent_worker_registered_count)
+  _wrun=$(cursor_agent_worker_running_count)
+  if [[ "$_wr" -gt 0 ]]; then
+    if [[ "$_wrun" -eq "$_wr" ]]; then _wdot="ok"; else _wdot="warn"; fi
+    printf '        <div class="card-h"><span class="dot %s"></span>%s</div>\n' "$_wdot" "$(_d "워커" "Workers")"
+    if [[ "$_wrun" -eq "$_wr" ]]; then
+      printf '        <p class="card-lead ok">%s</p>\n' "$(_d "등록 ${_wr}개 모두 실행 중" "All ${_wr} registered running")"
+    elif [[ "$_wrun" -gt 0 ]]; then
+      printf '        <p class="card-lead bad">%s</p>\n' "$(_d "실행 ${_wrun}/${_wr}" "${_wrun}/${_wr} running")"
     else
-      printf '        <div class="card-h"><span class="dot warn"></span>%s</div>\n' "$(_d "워커" "Worker")"
-      printf '        <p class="card-lead bad">%s</p>\n' "$(_d "중지" "Stopped")"
-      printf '        <p class="card-sub"><span class="path-chip mono" title="%s">%s · %s</span></p>\n' "$(html_escape "$pwd")" "$(_d "작업 폴더" "Working folder")" "$(html_escape "$pwdb")"
-      printf '        <form method="post" action="/action/worker-kickstart"><button type="submit" class="btn btn-pill">%s</button></form>\n' "$(_d "시작" "Start")"
+      printf '        <p class="card-lead bad">%s</p>\n' "$(_d "등록 ${_wr}개 · 모두 중지" "${_wr} registered · all stopped")"
     fi
+    printf '        <p class="card-sub">%s</p>\n' "$(_d "프로젝트마다 셋업 시 이 Mac에 plist가 추가됩니다." "Each project setup adds a plist on this Mac.")"
+    printf '        <div class="card-actions">\n'
+    printf '          <form method="post" action="/action/worker-kickstart"><button type="submit" class="btn btn-secondary btn-small btn-pill">%s</button></form>\n' "$(_d "전체 재시작" "Restart all")"
+    printf '        </div>\n'
   elif cursor_worker_process_running; then
-    printf '        <div class="card-h"><span class="dot warn"></span>%s</div>\n' "$(_d "워커" "Worker")"
+    printf '        <div class="card-h"><span class="dot warn"></span>%s</div>\n' "$(_d "워커" "Workers")"
     printf '        <p class="card-lead bad">%s</p>\n' "$(_d "프로세스만 실행" "Process only")"
     printf '        <p class="card-sub">%s</p>\n' "$(_d "프로젝트 카드에서 등록" "Register from a project card")"
   else
-    printf '        <div class="card-h"><span class="dot bad"></span>%s</div>\n' "$(_d "워커" "Worker")"
+    printf '        <div class="card-h"><span class="dot bad"></span>%s</div>\n' "$(_d "워커" "Workers")"
     printf '        <p class="card-lead bad">%s</p>\n' "$(_d "미등록" "Not registered")"
     printf '        <p class="card-sub">%s</p>\n' "$(_d "프로젝트 카드에서 설정" "Set up from a project card")"
   fi
@@ -1675,7 +1827,7 @@ dashboard_global_actions_html_interactive() {
 
 dashboard_workspace_rows_html_interactive() {
   local ws name origin br line worker_detail gap cur_gh suggest_gh _rnid
-  local other_worker_path other_worker_bn plist_w pwow
+  local other_worker_path other_worker_bn _nreg
   _rnid=0
   while IFS= read -r ws || [[ -n "$ws" ]]; do
     [[ -z "$ws" ]] && continue
@@ -1697,18 +1849,16 @@ dashboard_workspace_rows_html_interactive() {
     gap=$(workspace_gap_hint_for_path "$ws")
     other_worker_path=""
     other_worker_bn=""
-    plist_w="$HOME/Library/LaunchAgents/com.cursor.agent.worker.plist"
-    if [[ -f "$plist_w" ]]; then
-      pwow=$(plutil_string "$plist_w" WorkingDirectory)
-      if ! dirs_same "$pwow" "$ws"; then
-        other_worker_path=$(expand_tilde "$pwow")
-        other_worker_path=$(cd "$other_worker_path" 2>/dev/null && pwd -P || printf '%s' "$other_worker_path")
-        other_worker_bn=$(basename "$other_worker_path")
+    if ! cursor_agent_worker_plist_path_for_workspace "$ws" >/dev/null 2>&1; then
+      _nreg=$(cursor_agent_worker_registered_count)
+      if [[ "$_nreg" -gt 0 ]]; then
+        other_worker_path="$(_d "이 폴더 미등록" "No worker for this folder")"
+        other_worker_bn="$(_d "다른 경로 ${_nreg}개에 워커 있음" "${_nreg} on other paths")"
       fi
     fi
     local svc_shell svc_port svc_on svc_disp svc_exec_path disabled_attr stop_disabled stop_title _wsvc_json port_inp_extra
     local auto_csv primary_auto stop_port running_ports_label open_disabled open_title
-    local cf_show_ports _rest _tp _hn _anyh _pp
+    local cf_show_ports _rest _tp _hn _anyh _pp _cf_hn_list _cf_ing_ports
     svc_shell=""
     svc_port=""
     svc_disp=""
@@ -1935,15 +2085,27 @@ print('svc_exec_path=' + shlex.quote(d.get('exec') or ''))
         _rest="${_rest#*,}"
         _tp="${_tp// /}"
         [[ "$_tp" =~ ^[0-9]+$ ]] || continue
-        printf '        <div class="ws-tunnel-row"><span class="mono">%s %s</span> · ' "$(_d "포트" "Port")" "$(html_escape "$_tp")"
-        _anyh=0
+        _cf_hn_list=()
         while IFS= read -r _hn || [[ -n "$_hn" ]]; do
           [[ -z "$_hn" ]] && continue
-          _anyh=1
-          printf '<a class="ws-tunnel-link" href="https://%s/" target="_blank" rel="noopener noreferrer">%s</a> ' "$(html_escape "$_hn")" "$(html_escape "$_hn")"
+          _cf_hn_list+=("$_hn")
         done < <(cloudflare_hostnames_for_port "$_tp")
-        if [[ "$_anyh" -eq 0 ]]; then
+        _anyh=${#_cf_hn_list[@]}
+        if [[ "$_anyh" -gt 0 ]]; then
+          printf '        <div class="ws-tunnel-row ws-tunnel-row--matched"><span class="mono">%s %s</span> · ' "$(_d "포트" "Port")" "$(html_escape "$_tp")"
+          for _hn in "${_cf_hn_list[@]}"; do
+            printf '<a class="ws-tunnel-link" href="https://%s/" target="_blank" rel="noopener noreferrer">%s</a> ' "$(html_escape "$_hn")" "$(html_escape "$_hn")"
+          done
+          printf '<span class="ws-tunnel-ok">%s</span>' "$(_d "터널과 포트 일치" "Tunnel matches this port")"
+        else
+          printf '        <div class="ws-tunnel-row"><span class="mono">%s %s</span> · ' "$(_d "포트" "Port")" "$(html_escape "$_tp")"
           printf '<span class="ws-tunnel-miss">%s</span>' "$(_d "연결된 도메인 없음" "No domain for this port")"
+          if cloudflare_looks_connected; then
+            _cf_ing_ports="$(cloudflare_config_ingress_local_ports_unique_csv)"
+            if [[ -n "$_cf_ing_ports" ]]; then
+              printf ' <span class="ws-tunnel-miss-hint">%s <span class="mono">%s</span></span>' "$(_d "config ingress 포트:" "config ingress ports:")" "$(html_escape "$_cf_ing_ports")"
+            fi
+          fi
         fi
         printf '</div>\n'
       done
@@ -1981,7 +2143,7 @@ print('svc_exec_path=' + shlex.quote(d.get('exec') or ''))
     fi
     printf '          <div class="repo-worker">%s</div>\n' "$(html_escape "$worker_detail")"
     if [[ -n "$other_worker_bn" ]]; then
-      printf '          <p class="repo-worker-remote">%s <span class="mono" title="%s">%s</span> %s</p>\n' "$(_d "워커 폴더:" "Worker folder:")" "$(html_escape "$other_worker_path")" "$(html_escape "$other_worker_bn")" "$(_d "이 카드와 다를 수 있음. 아래에서 이 경로로 맞출 수 있습니다." "May differ from this card. Use below to align.")"
+      printf '          <p class="repo-worker-remote">%s <span class="mono" title="%s">%s</span> %s</p>\n' "$(_d "워커:" "Worker:")" "$(html_escape "$other_worker_path")" "$(html_escape "$other_worker_bn")" "$(_d "「이 폴더 설정」으로 이 경로에 워커 plist를 추가할 수 있습니다." "Use Set up this folder to add a worker plist for this path.")"
     fi
     if [[ "$gap" == "OK" ]]; then
       if [[ -n "$other_worker_bn" ]]; then
@@ -2175,7 +2337,10 @@ dashboard_emit_html_template() {
   .ws-tunnel { margin:10px 0 12px; padding:12px 14px; background:#0c1629; border:1px solid var(--border); border-radius:8px; }
   .ws-tunnel-hint { font-size:11px; color:var(--muted); margin:0; line-height:1.45; }
   .ws-tunnel-row { font-size:12px; margin:6px 0; line-height:1.45; display:flex; flex-wrap:wrap; align-items:center; gap:6px; }
+  .ws-tunnel-row--matched { border-left:3px solid var(--ok); padding-left:10px; margin-left:-2px; border-radius:2px; }
   .ws-tunnel-miss { color:var(--warn); font-size:11px; }
+  .ws-tunnel-miss-hint { color:var(--muted); font-size:10px; }
+  .ws-tunnel-ok { color:var(--ok); font-size:11px; font-weight:600; }
   .ws-tunnel-link { color:var(--accent); text-decoration:none; font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:11px; }
   .ws-tunnel-link:hover { text-decoration:underline; }
   .side-dash-actions-wrap { display:flex; flex-direction:column; gap:6px; margin-top:4px; }
@@ -2189,6 +2354,7 @@ dashboard_emit_html_template() {
   .btn-choice:hover { border-color:var(--accent); background:#1c2128; }
   .btn-choice:active { filter:brightness(0.95); }
   .btn-choice .btn-choice-sub { font-size:10px; font-weight:500; color:var(--muted); margin-top:2px; }
+  .btn-choice .btn-choice-sub:empty { display:none; margin:0; padding:0; }
   .btn-choice .btn-choice-main { display:flex; flex-direction:column; align-items:flex-start; gap:0; }
   .btn-choice .chev { color:var(--muted); font-size:14px; flex-shrink:0; }
   form.choice-form { margin:0 0 6px; }
@@ -2203,17 +2369,18 @@ dashboard_emit_html_template() {
   .lang-pill:hover { color:var(--text); border-color:var(--accent); }
   .lang-pill-active { background:var(--accent); border-color:var(--accent); color:#fff !important; }
   details.quick-check { margin-bottom:20px; border:1px solid var(--border); border-radius:10px; background:var(--surface); overflow:hidden; }
-  details.quick-check summary { list-style:none; cursor:pointer; padding:12px 14px; display:flex; flex-wrap:wrap; align-items:center; gap:10px; user-select:none; }
+  details.quick-check summary { list-style:none; cursor:pointer; padding:12px 14px; display:flex; flex-wrap:wrap; align-items:center; gap:10px 14px; user-select:none; }
   details.quick-check summary::-webkit-details-marker { display:none; }
   details.quick-check summary::marker { content:none; }
-  .qc-summary-locale { display:flex; flex-wrap:wrap; align-items:center; gap:10px; flex:1; min-width:0; }
-  .qc-mid { display:inline-flex; flex-wrap:wrap; align-items:center; gap:8px; max-width:100%; }
-  .qc-dots { display:inline-flex; gap:7px; align-items:center; }
-  .qc-dots .dot { width:10px; height:10px; }
-  .qc-legend { font-size:10px; color:var(--muted); font-weight:500; line-height:1.3; letter-spacing:.02em; }
-  .qc-title { font-size:13px; font-weight:700; color:var(--text); }
-  .qc-chev { margin-left:auto; color:var(--muted); font-size:12px; transition:transform .15s ease; }
+  .qc-title { font-size:13px; font-weight:700; color:var(--text); flex-shrink:0; }
+  .qc-pairs { display:flex; flex-wrap:wrap; align-items:center; gap:6px 14px; flex:1; min-width:0; }
+  .qc-pair { display:inline-flex; align-items:center; gap:7px; font-size:11px; color:var(--muted); font-weight:500; }
+  .qc-pair .dot { width:9px; height:9px; flex-shrink:0; }
+  .qc-lbl { line-height:1.25; white-space:nowrap; }
+  .qc-chev { margin-left:auto; flex-shrink:0; color:var(--muted); font-size:12px; transition:transform .15s ease; }
+  [data-dash-locale][hidden] { display:none !important; }
   details.quick-check[open] summary .qc-chev { transform:rotate(90deg); }
+  .qc-lang-block { display:flex; flex-wrap:wrap; align-items:center; gap:10px 14px; flex:1; min-width:0; }
   .quick-check-grid { margin:0 14px 14px; }
   details.step-advanced { margin-top:8px; border-top:1px dashed var(--border); padding-top:8px; }
   details.step-advanced summary { font-size:10px; color:var(--muted); cursor:pointer; list-style:none; user-select:none; padding:4px 0; }
@@ -2303,12 +2470,12 @@ status_dashboard_write_html() {
   LBL_FAV_EN="Favorites"
   LBL_PROJECTS_KO="프로젝트"
   LBL_PROJECTS_EN="Projects"
-  _dashboard_quick_check_dual_to_file "$qcfile"
+  _dashboard_quick_check_summary_write_file "$qcfile"
   dashboard_global_cards_html > "$gfile"
   printf '\n' > "$gafile"
   printf '%s\n' "<p class=\"side-note\">$(_d "로컬 서버:" "Local server:") <code>./setup</code></p>" > "$sfile"
   if ! discover_workspace_paths | grep -q .; then
-    printf '    <div class="repo"><div class="repo-name">%s</div><div class="repo-path mono">%s</div></div>\n' "$(_d "폴더 없음" "No folders")" "$(_d "workspaces.txt 또는 ~/Dev 스캔" "workspaces.txt or ~/Dev scan")" > "$wfile"
+    printf '    <div class="repo"><div class="repo-name">%s</div><div class="repo-path mono">%s</div></div>\n' "$(_d "폴더 없음" "No folders")" "$(_d "추가한 폴더·~/Dev 등에서 찾습니다" "From added folders and e.g. ~/Dev")" > "$wfile"
   else
     dashboard_workspace_rows_html > "$wfile"
   fi
@@ -3032,7 +3199,7 @@ status_dashboard_write_html_interactive() {
   LBL_FAV_EN="Favorites"
   LBL_PROJECTS_KO="프로젝트"
   LBL_PROJECTS_EN="Projects"
-  _dashboard_quick_check_dual_to_file "$qcfile"
+  _dashboard_quick_check_summary_write_file "$qcfile"
   local _root="${CURSOR_SETUP_ROOT:-${ROOT:-.}}"
   if [[ -n "${CURSOR_SETUP_EXEC_HINT:-}" ]]; then
     setup_ex="$CURSOR_SETUP_EXEC_HINT"
@@ -3073,8 +3240,8 @@ status_dashboard_write_html_interactive() {
     {
       printf '    <div class="repo">\n'
       printf '      <div class="repo-name">%s</div>\n' "$(_d "프로젝트 폴더가 없습니다" "No project folders yet")"
-      printf '      <div class="repo-path mono">%s <a href="/refresh">%s</a></div>\n' "$(_d "왼쪽 「Finder에서 폴더 추가」를 누르거나 아래를 눌러 목록을 만듭니다." "Use 「Add folder in Finder」 on the left, or add paths below.")" "$(_d "새로고침" "Refresh")"
-      printf '      <form method="post" action="/workspace-add-folder" class="choice-form" style="margin-top:10px"><button type="submit" class="btn-choice"><span class="btn-choice-main"><span>%s</span><span class="btn-choice-sub">workspaces.txt</span></span><span class="chev">›</span></button></form>\n' "$(_d "Finder에서 폴더 추가" "Add folder in Finder")"
+      printf '      <div class="repo-path mono">%s <a href="/refresh">%s</a></div>\n' "$(_d "왼쪽에서 폴더를 추가한 뒤 새로고침하세요." "Add folders on the left, then refresh.")" "$(_d "새로고침" "Refresh")"
+      printf '      <form method="post" action="/workspace-add-folder" class="choice-form" style="margin-top:10px"><button type="submit" class="btn-choice"><span class="btn-choice-main"><span>%s</span><span class="btn-choice-sub">%s</span></span><span class="chev">›</span></button></form>\n' "$(_d "Finder에서 폴더 추가" "Add folder in Finder")" ""
       printf '    </div>\n'
     } > "$wfile"
   else
@@ -3187,7 +3354,7 @@ status_dashboard_open_html() {
 }
 
 # --- scripts/lib/dashboard_flow.sh.sh ---
-# 브라우저 대시보드(기본 0.0.0.0 바인딩) — 클릭 시 터미널에서 이어 실행
+# 브라우저 대시보드(기본 127.0.0.1 바인딩) — 클릭 시 터미널에서 이어 실행
 
 dashboard_write_allowlist_file() {
   local dest="$1"
@@ -3223,7 +3390,7 @@ _dashboard_server_write_py() {
   python3 <<'PY' > "$out"
 import textwrap, sys
 code = r'''
-import os, re, subprocess, sys, threading, time, urllib.parse, json, pathlib
+import os, re, secrets, subprocess, sys, threading, time, urllib.parse, json, pathlib
 from http.server import HTTPServer, BaseHTTPRequestHandler
 import shlex
 
@@ -3535,6 +3702,8 @@ def _multipart_parse(ct, rawb):
             fields["path"] = fs.getfirst("path") or ""
         if "port" in fs:
             fields["port"] = fs.getfirst("port") or ""
+        if "_csrf" in fs:
+            fields["_csrf"] = fs.getfirst("_csrf") or ""
         if "file" in fs:
             item = fs["file"]
             if isinstance(item, list):
@@ -3606,11 +3775,32 @@ def _mac_choose_file_posix():
     return p or None
 
 
+class DashServer(HTTPServer):
+    def __init__(self, server_address, RequestHandlerClass):
+        super().__init__(server_address, RequestHandlerClass)
+        self.csrf_token = secrets.token_urlsafe(32)
+
+
 class H(BaseHTTPRequestHandler):
     server_version = "CursorSetupDash/1.0"
+    # 부모 프로세스가 이미 HTML 을 썼을 때 첫 GET 에서 중복 --_cursor-setup-write-dash 를 피함
+    _regen_cooldown_sec = 2.5
+    _last_regen_time = 0.0
 
     def log_message(self, fmt, *args):
         pass
+
+    def end_headers(self):
+        # 로컬 대시보드라도 브라우저 기본 보호 헤더를 넣어 임의 임베드/스니핑을 줄인다.
+        self.send_header("X-Frame-Options", "DENY")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("Referrer-Policy", "no-referrer")
+        self.send_header(
+            "Content-Security-Policy",
+            "default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; "
+            "script-src 'self' 'unsafe-inline'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'",
+        )
+        super().end_headers()
 
     def handle_one_request(self):
         try:
@@ -3623,8 +3813,15 @@ class H(BaseHTTPRequestHandler):
         if auto_close:
             script_body = script_body + "; exit"
         wrapped = "bash -lc " + shlex.quote(script_body)
+
         def aq(s):
             return '"' + s.replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+        # 앞으로 가져오기 — 대시보드 버튼 후 터미널이 뒤에만 뜨는 문제 완화
+        subprocess.run(
+            ["osascript", "-e", 'tell application "Terminal" to activate'],
+            check=False,
+        )
         scpt = "tell application \"Terminal\" to do script " + aq(wrapped)
         subprocess.run(["osascript", "-e", scpt], check=False)
 
@@ -3645,6 +3842,26 @@ class H(BaseHTTPRequestHandler):
         env["CURSOR_DASH_LANG"] = self._dash_lang_from_headers()
         subprocess.run([setup, "--_cursor-setup-write-dash", htm], env=env, check=False)
 
+    def _request_forces_regen(self):
+        """브라우저 강력 새로고침 등 — 쿨다운 무시"""
+        cc = (self.headers.get("Cache-Control") or "").lower()
+        if "no-cache" in cc or "max-age=0" in cc:
+            return True
+        pragma = (self.headers.get("Pragma") or "").lower()
+        if "no-cache" in pragma:
+            return True
+        return False
+
+    def _maybe_regen_dashboard(self):
+        now = time.time()
+        force = self._request_forces_regen()
+        if (
+            force
+            or (now - H._last_regen_time) >= H._regen_cooldown_sec
+        ):
+            self._regen()
+            H._last_regen_time = time.time()
+
     def _allow_ok(self, path):
         path = os.path.realpath(path)
         if not path or not os.path.isdir(path):
@@ -3664,6 +3881,31 @@ class H(BaseHTTPRequestHandler):
                     continue
         return False
 
+    def _post_same_origin_ok(self):
+        host = (self.headers.get("Host", "") or "").strip().lower()
+        if not host:
+            return False
+        for hname in ("Origin", "Referer"):
+            raw = (self.headers.get(hname, "") or "").strip()
+            if not raw:
+                continue
+            try:
+                p = urllib.parse.urlsplit(raw)
+            except Exception:
+                continue
+            if p.scheme not in ("http", "https"):
+                continue
+            src = (p.netloc or "").strip().lower()
+            if src and src == host:
+                return True
+        # 일부 클라이언트는 Origin/Referer 를 보내지 않으므로 루프백 클라이언트만 허용
+        ra = ""
+        try:
+            ra = (self.client_address[0] or "").strip().lower()
+        except Exception:
+            pass
+        return ra in ("127.0.0.1", "::1", "::ffff:127.0.0.1")
+
     def _html_ok(self):
         b = (
             "<!DOCTYPE html><html lang=\"ko\"><meta charset=\"utf-8\">"
@@ -3682,10 +3924,21 @@ class H(BaseHTTPRequestHandler):
         )
         return b.encode("utf-8")
 
+    def _html_origin_denied(self):
+        b = (
+            "<!DOCTYPE html><html lang=\"ko\"><meta charset=\"utf-8\">"
+            "<body style=\"font-family:system-ui;background:#0d1117;color:#e6edf3;padding:24px\">"
+            "<p>요청 출처를 확인할 수 없어 거부했습니다. 대시보드 페이지에서 다시 시도해 주세요.</p>"
+            "<p><a href=\"/\" style=\"color:#2f81f7\">대시보드로</a></p></body></html>"
+        )
+        return b.encode("utf-8")
+
     def do_GET(self):
         parsed = urllib.parse.urlparse(self.path)
         p = parsed.path
         if p == "/refresh":
+            self._regen()
+            H._last_regen_time = time.time()
             self.send_response(302)
             self.send_header("Location", "/")
             self.end_headers()
@@ -3696,15 +3949,17 @@ class H(BaseHTTPRequestHandler):
                 v = (q["lang"][0] or "").lower()
                 if v in ("en", "ko"):
                     self.send_response(302)
-                    self.send_header("Location", "/")
+                    # 쿠키 반영 HTML 이 필요하므로 /refresh 로 한 번 갱신 후 홈으로
+                    self.send_header("Location", "/refresh")
                     self.send_header(
                         "Set-Cookie",
-                        "cursor_dash_lang=" + v + "; Path=/; Max-Age=31536000; SameSite=Lax",
+                        "cursor_dash_lang=" + v + "; Path=/; Max-Age=31536000; SameSite=Lax; HttpOnly",
                     )
                     self.end_headers()
                     return
-            # 브라우저 새로고침(F5)도 최신 git remote·상태를 쓰려면 매번 다시 그림
-            self._regen()
+            # 직전에 부모가 HTML 을 썼으면 쿨다운 동안 스킵(시작 직후 이중 실행 방지).
+            # 오래 지난 뒤·강력 새로고침·footer 의 /refresh 는 최신 상태로 다시 그림.
+            self._maybe_regen_dashboard()
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
             self.send_header("Cache-Control", "no-store")
@@ -3738,6 +3993,12 @@ class H(BaseHTTPRequestHandler):
         root = os.environ["CURSOR_SETUP_ROOT"]
         setup = os.environ["CURSOR_SETUP_SCRIPT"]
         p = self.path.split("?", 1)[0]
+        if not self._post_same_origin_ok():
+            self.send_response(403)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.end_headers()
+            self.wfile.write(self._html_origin_denied())
+            return
         if p == "/set-lang":
             length = int(self.headers.get("Content-Length", "0"))
             body = self.rfile.read(length).decode("utf-8", errors="replace") if length else ""
@@ -3748,7 +4009,7 @@ class H(BaseHTTPRequestHandler):
             self.send_response(204)
             self.send_header(
                 "Set-Cookie",
-                "cursor_dash_lang=" + raw + "; Path=/; Max-Age=31536000; SameSite=Lax",
+                "cursor_dash_lang=" + raw + "; Path=/; Max-Age=31536000; SameSite=Lax; HttpOnly",
             )
             self.end_headers()
             return
@@ -4288,8 +4549,19 @@ class H(BaseHTTPRequestHandler):
                 ),
                 "/action/open-github": "open https://github.com",
                 "/action/open-cursor-docs": "open https://cursor.com/docs",
-                "/action/worker-kickstart": "launchctl kickstart -k gui/{}/com.cursor.agent.worker 2>/dev/null || true".format(
-                    uid
+                "/action/worker-kickstart": (
+                    "echo '=== Cursor agent workers ==='; echo ''; "
+                    "uid=$(id -u); n=0; "
+                    "shopt -s nullglob; "
+                    "for p in \"$HOME/Library/LaunchAgents\"/com.cursor.agent.worker.plist "
+                    "\"$HOME/Library/LaunchAgents\"/com.cursor.agent.worker.*.plist; do "
+                    '[[ -f "$p" ]] || continue; '
+                    'lb=$(plutil -extract Label raw "$p" 2>/dev/null) || continue; '
+                    'echo "-- $lb"; '
+                    'if launchctl kickstart -k "gui/$uid/$lb" 2>&1; then echo "   OK"; else echo "   FAILED"; fi; '
+                    "n=$((n+1)); done; shopt -u nullglob; "
+                    "if [[ \"$n\" -eq 0 ]]; then echo '(No worker plists — run Set up this folder on each project.)'; fi; "
+                    "echo ''; echo 'Closing in 4 seconds...'; sleep 4"
                 ),
             }
             auto_close = {
@@ -4313,9 +4585,23 @@ class H(BaseHTTPRequestHandler):
 
 def main():
     port = int(os.environ["CURSOR_DASH_PORT"])
-    host = os.environ.get("CURSOR_DASH_HOST", "0.0.0.0")
-    httpd = HTTPServer((host, port), H)
-    print("[정보] 대시보드 http://{}:{}/ (종료: Ctrl+C)".format(host, port), flush=True)
+    host = os.environ.get("CURSOR_DASH_HOST", "127.0.0.1")
+    try:
+        H._regen_cooldown_sec = float(os.environ.get("CURSOR_DASH_REGEN_COOLDOWN_SEC", "2.5"))
+    except (TypeError, ValueError):
+        H._regen_cooldown_sec = 2.5
+    if H._regen_cooldown_sec < 0:
+        H._regen_cooldown_sec = 0.0
+    H._last_regen_time = time.time()
+    httpd = DashServer((host, port), H)
+    shown_host = host
+    if host in ("0.0.0.0", "::"):
+        shown_host = "127.0.0.1"
+    print("[정보] 대시보드 http://{}:{}/ (종료: Ctrl+C)".format(shown_host, port), flush=True)
+    if host in ("0.0.0.0", "::"):
+        lip = _lan_ipv4()
+        if lip:
+            print("[정보] LAN 접근 주소: http://{}:{}/".format(lip, port), flush=True)
     httpd.serve_forever()
 
 if __name__ == "__main__":
@@ -4333,7 +4619,13 @@ dashboard_server_main_blocking() {
     return 1
   fi
   preferred="${CURSOR_DASH_PORT:-58741}"
-  bind_host="${CURSOR_DASH_HOST:-0.0.0.0}"
+  if [[ -n "${CURSOR_DASH_HOST:-}" ]]; then
+    bind_host="$CURSOR_DASH_HOST"
+  elif [[ "${CURSOR_DASH_LAN:-0}" == "1" ]]; then
+    bind_host="0.0.0.0"
+  else
+    bind_host="127.0.0.1"
+  fi
   dashboard_free_listen_port "$preferred"
   if python3 -c "import socket; s=socket.socket(); s.bind(('$bind_host', int('$preferred'))); s.close()" 2>/dev/null; then
     port="$preferred"
@@ -4368,7 +4660,12 @@ dashboard_server_main_blocking() {
   }
   trap '_dashboard_cleanup' EXIT INT TERM
 
-  ( sleep 0.35 && open "http://127.0.0.1:${port}/" ) &
+  if [[ "${CURSOR_DASH_OPEN_BROWSER:-1}" != "0" ]]; then
+    ( sleep 0.2 && open "http://127.0.0.1:${port}/" ) &
+  fi
+  if [[ "$bind_host" != "127.0.0.1" && "$bind_host" != "::1" && "$bind_host" != "localhost" ]]; then
+    log_warn "대시보드가 LAN 에 노출됩니다 (${bind_host}:${port}). 신뢰 네트워크에서만 사용하세요."
+  fi
   python3 "$py"
 }
 
@@ -4745,6 +5042,138 @@ cursor_agent_install_worker_entry_script() {
   return 0
 }
 
+cursor_agent_launchctl_bootstrap_worker_plist() {
+  local uid="$1" plist="$2" label="$3" err
+  launchctl bootout "gui/$uid/$label" 2>/dev/null || true
+  sleep 0.35
+  err=$(mktemp)
+  if launchctl bootstrap "gui/$uid" "$plist" 2>"$err"; then
+    rm -f "$err"
+    return 0
+  fi
+  log_warn "launchctl bootstrap 1차 실패 — 재시도: $(head -c 200 "$err" 2>/dev/null | tr '\n' ' ')"
+  rm -f "$err"
+  sleep 0.55
+  launchctl bootout "gui/$uid/$label" 2>/dev/null || true
+  sleep 0.35
+  if ! launchctl bootstrap "gui/$uid" "$plist"; then
+    log_err "launchctl bootstrap 실패 — 터미널: launchctl bootout gui/$uid/$label 후 다시 setup"
+    return 1
+  fi
+  return 0
+}
+
+# 레거시 단일 com.cursor.agent.worker.plist → 경로별 com.cursor.agent.worker.<hash>.plist
+cursor_agent_migrate_legacy_worker_plist() {
+  local legacy="$HOME/Library/LaunchAgents/com.cursor.agent.worker.plist"
+  [[ -f "$legacy" ]] || return 0
+  local old_wd suf label np uid agent_bin wrap_script plist_src plist_tmp log_dir
+  old_wd=$(plutil_string "$legacy" WorkingDirectory)
+  [[ -n "$old_wd" ]] || {
+    rm -f "$legacy"
+    return 0
+  }
+  old_wd=$(expand_tilde "$old_wd")
+  old_wd=$(cd "$old_wd" 2>/dev/null && pwd -P) || return 0
+  suf=$(cursor_agent_worker_suffix_for_path "$old_wd") || return 0
+  label="com.cursor.agent.worker.$suf"
+  np="$HOME/Library/LaunchAgents/${label}.plist"
+  uid="$(id -u)"
+  launchctl bootout "gui/$uid/com.cursor.agent.worker" 2>/dev/null || true
+  sleep 0.3
+  if [[ -f "$np" ]]; then
+    rm -f "$legacy"
+    return 0
+  fi
+  agent_bin="$HOME/.local/bin/agent"
+  wrap_script="$HOME/.cursor-setup/agent-worker-entry.sh"
+  log_dir="$HOME/Library/Logs/CursorAgentWorker"
+  plist_src=""
+  plist_tmp=""
+  if [[ -n "${CURSOR_SETUP_ROOT:-}" ]] && [[ -f "$CURSOR_SETUP_ROOT/templates/com.cursor.agent.worker.plist" ]]; then
+    plist_src="$CURSOR_SETUP_ROOT/templates/com.cursor.agent.worker.plist"
+  elif declare -F cursor_agent_worker_plist_template >/dev/null 2>&1; then
+    plist_tmp="$(mktemp -t cursor-worker-plist)"
+    cursor_agent_worker_plist_template > "$plist_tmp"
+    plist_src="$plist_tmp"
+  fi
+  [[ -n "$plist_src" && -f "$plist_src" ]] || {
+    [[ -n "$plist_tmp" ]] && rm -f "$plist_tmp"
+    return 0
+  }
+  ensure_dir "$log_dir"
+  sed -e "s|__LABEL__|$label|g" \
+      -e "s|__WRAP_SCRIPT__|$wrap_script|g" \
+      -e "s|__AGENT_BIN__|$agent_bin|g" \
+      -e "s|__WORK_DIR__|$old_wd|g" \
+      -e "s|__LOG_OUT__|$log_dir/agent-worker-$suf.log|g" \
+      -e "s|__LOG_ERR__|$log_dir/agent-worker-$suf.err.log|g" \
+      "$plist_src" > "$np"
+  [[ -n "$plist_tmp" ]] && rm -f "$plist_tmp"
+  if cursor_agent_launchctl_bootstrap_worker_plist "$uid" "$np" "$label"; then
+    rm -f "$legacy"
+    launchctl kickstart -k "gui/$uid/$label" 2>/dev/null || true
+  fi
+  return 0
+}
+
+# $1 작업 폴더 — 경로별 LaunchAgent 등록·기동 (대시보드에서 폴더마다 setup 시)
+cursor_agent_install_launchagent_for_workspace_dir() {
+  local work_dir="${1:?}"
+  work_dir=$(expand_tilde "$work_dir")
+  work_dir=$(cd "$work_dir" 2>/dev/null && pwd -P) || {
+    log_err "작업 폴더 없음: $1"
+    return 1
+  }
+
+  local plist_src="" plist_tmp="" label suf plist_dst log_dir wrap_script agent_bin uid
+  agent_bin="$HOME/.local/bin/agent"
+  wrap_script="$HOME/.cursor-setup/agent-worker-entry.sh"
+  log_dir="$HOME/Library/Logs/CursorAgentWorker"
+  ensure_dir "$log_dir"
+
+  if [[ -n "${CURSOR_SETUP_ROOT:-}" ]] && [[ -f "$CURSOR_SETUP_ROOT/templates/com.cursor.agent.worker.plist" ]]; then
+    plist_src="$CURSOR_SETUP_ROOT/templates/com.cursor.agent.worker.plist"
+  elif declare -F cursor_agent_worker_plist_template >/dev/null 2>&1; then
+    plist_tmp="$(mktemp -t cursor-worker-plist)"
+    cursor_agent_worker_plist_template > "$plist_tmp"
+    plist_src="$plist_tmp"
+  fi
+
+  if [[ -z "$plist_src" ]] || [[ ! -f "$plist_src" ]]; then
+    log_err "worker plist 템플릿 없음"
+    [[ -n "$plist_tmp" ]] && rm -f "$plist_tmp"
+    return 1
+  fi
+
+  cursor_agent_install_worker_entry_script || {
+    [[ -n "$plist_tmp" ]] && rm -f "$plist_tmp"
+    return 1
+  }
+
+  suf=$(cursor_agent_worker_suffix_for_path "$work_dir") || {
+    [[ -n "$plist_tmp" ]] && rm -f "$plist_tmp"
+    return 1
+  }
+  label="com.cursor.agent.worker.$suf"
+  plist_dst="$HOME/Library/LaunchAgents/${label}.plist"
+
+  sed -e "s|__LABEL__|$label|g" \
+      -e "s|__WRAP_SCRIPT__|$wrap_script|g" \
+      -e "s|__AGENT_BIN__|$agent_bin|g" \
+      -e "s|__WORK_DIR__|$work_dir|g" \
+      -e "s|__LOG_OUT__|$log_dir/agent-worker-$suf.log|g" \
+      -e "s|__LOG_ERR__|$log_dir/agent-worker-$suf.err.log|g" \
+      "$plist_src" > "$plist_dst"
+  [[ -n "$plist_tmp" ]] && rm -f "$plist_tmp"
+  log_info "LaunchAgent plist 저장됨 ($label)"
+
+  uid="$(id -u)"
+  cursor_agent_launchctl_bootstrap_worker_plist "$uid" "$plist_dst" "$label" || return 1
+  launchctl kickstart -k "gui/$uid/$label" 2>/dev/null || true
+  return 0
+}
+
 cursor_agent_main() {
   local work_dir="${1:-}"
   if [[ -z "$work_dir" ]]; then
@@ -4796,74 +5225,16 @@ cursor_agent_main() {
     fi
   fi
 
-  local plist_src=""
-  local plist_tmp=""
-  if [[ -n "${CURSOR_SETUP_ROOT:-}" ]] && [[ -f "$CURSOR_SETUP_ROOT/templates/com.cursor.agent.worker.plist" ]]; then
-    plist_src="$CURSOR_SETUP_ROOT/templates/com.cursor.agent.worker.plist"
-  elif declare -F cursor_agent_worker_plist_template >/dev/null 2>&1; then
-    plist_tmp="$(mktemp -t cursor-worker-plist)"
-    cursor_agent_worker_plist_template > "$plist_tmp"
-    plist_src="$plist_tmp"
-  fi
-
-  local plist_dst="$HOME/Library/LaunchAgents/com.cursor.agent.worker.plist"
-  local log_dir="$HOME/Library/Logs/CursorAgentWorker"
-  local wrap_script="$HOME/.cursor-setup/agent-worker-entry.sh"
-  ensure_dir "$log_dir"
-
-  cursor_agent_install_worker_entry_script || exit 1
-
-  if [[ -z "$plist_src" ]] || [[ ! -f "$plist_src" ]]; then
-    log_err "worker plist 템플릿 없음"
-    [[ -n "$plist_tmp" ]] && rm -f "$plist_tmp"
+  work_dir=$(expand_tilde "$work_dir")
+  work_dir=$(cd "$work_dir" 2>/dev/null && pwd -P) || {
+    log_err "작업 폴더 없음"
     exit 1
-  fi
-
-  local old_wd=""
-  [[ -f "$plist_dst" ]] && old_wd=$(plutil_string "$plist_dst" WorkingDirectory)
-
-  sed -e "s|__WRAP_SCRIPT__|$wrap_script|g" \
-      -e "s|__AGENT_BIN__|$agent_bin|g" \
-      -e "s|__WORK_DIR__|$work_dir|g" \
-      -e "s|__LOG_OUT__|$log_dir/agent-worker.log|g" \
-      -e "s|__LOG_ERR__|$log_dir/agent-worker.err.log|g" \
-      "$plist_src" > "$plist_dst"
-  [[ -n "$plist_tmp" ]] && rm -f "$plist_tmp"
-  log_info "LaunchAgent plist 저장됨"
-
-  cursor_agent_launchctl_bootstrap_worker() {
-    local uid plist err
-    uid="$(id -u)"
-    plist="$plist_dst"
-    launchctl bootout "gui/$uid/com.cursor.agent.worker" 2>/dev/null || true
-    sleep 0.35
-    err=$(mktemp)
-    if launchctl bootstrap "gui/$uid" "$plist" 2>"$err"; then
-      rm -f "$err"
-      return 0
-    fi
-    log_warn "launchctl bootstrap 1차 실패 — 재시도 (macOS EIO 등): $(head -c 200 "$err" 2>/dev/null | tr '\n' ' ')"
-    rm -f "$err"
-    sleep 0.55
-    launchctl bootout "gui/$uid/com.cursor.agent.worker" 2>/dev/null || true
-    sleep 0.35
-    if ! launchctl bootstrap "gui/$uid" "$plist"; then
-      log_err "launchctl bootstrap 실패 — 터미널에서: launchctl bootout gui/$uid/com.cursor.agent.worker 후 다시 setup"
-      return 1
-    fi
-    return 0
   }
 
-  if [[ "$old_wd" == "$work_dir" ]] && [[ -n "$old_wd" ]]; then
-    log_info "워커: 같은 폴더 — plist·진입 스크립트 반영을 위해 재기동"
-    cursor_agent_launchctl_bootstrap_worker || return 1
-    launchctl kickstart -k "gui/$(id -u)/com.cursor.agent.worker" 2>/dev/null || true
-    return 0
-  fi
+  cursor_agent_migrate_legacy_worker_plist
 
-  if [[ "${CURSOR_SETUP_WORKSPACE_LOCKED:-0}" == "1" ]] || prompt_yn "워커 자동 실행(재부팅 후에도) 등록할까요?" "y"; then
-    cursor_agent_launchctl_bootstrap_worker || return 1
-    launchctl kickstart -k "gui/$(id -u)/com.cursor.agent.worker" 2>/dev/null || true
+  if [[ "${CURSOR_SETUP_WORKSPACE_LOCKED:-0}" == "1" ]] || prompt_yn "이 폴더용 워커 자동 실행(재부팅 후에도) 등록할까요?" "y"; then
+    cursor_agent_install_launchagent_for_workspace_dir "$work_dir" || exit 1
   else
     printf '%s\n' "  cd $(printf '%q' "$work_dir") && $agent_bin worker start"
   fi
@@ -5217,7 +5588,7 @@ cursor_agent_worker_plist_template() {
 <plist version="1.0">
 <dict>
 	<key>Label</key>
-	<string>com.cursor.agent.worker</string>
+	<string>__LABEL__</string>
 	<key>ProgramArguments</key>
 	<array>
 		<string>/bin/bash</string>

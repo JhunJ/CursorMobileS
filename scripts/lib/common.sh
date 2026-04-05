@@ -176,6 +176,65 @@ dirs_same() {
   return 1
 }
 
+# 실경로 기준 12자 hex — 폴더마다 별도 LaunchAgent 라벨에 사용
+cursor_agent_worker_suffix_for_path() {
+  local rp="${1:-}"
+  [[ -n "$rp" ]] || return 1
+  rp=$(expand_tilde "$rp")
+  if ! rp=$(cd "$rp" 2>/dev/null && pwd -P); then
+    rp=$(realpath_dir "$rp" 2>/dev/null) || return 1
+  fi
+  [[ -n "$rp" ]] || return 1
+  printf '%s' "$rp" | shasum -a 256 2>/dev/null | awk '{print substr($1,1,12)}'
+}
+
+cursor_agent_worker_label_for_path() {
+  local suf
+  suf="$(cursor_agent_worker_suffix_for_path "$1")" || return 1
+  printf 'com.cursor.agent.worker.%s\n' "$suf"
+}
+
+# LaunchAgents 안의 Cursor worker plist 한 줄씩 (레거시 단일 + 경로별)
+cursor_agent_worker_list_plists() {
+  shopt -s nullglob
+  local f
+  for f in "$HOME/Library/LaunchAgents"/com.cursor.agent.worker.plist "$HOME/Library/LaunchAgents"/com.cursor.agent.worker.*.plist; do
+    [[ -f "$f" ]] || continue
+    printf '%s\n' "$f"
+  done
+  shopt -u nullglob
+}
+
+cursor_agent_worker_plist_path_for_workspace() {
+  local ws="$1" wf pw
+  ws=$(realpath_dir "$ws")
+  while IFS= read -r wf; do
+    [[ -z "$wf" ]] && continue
+    pw=$(plutil_string "$wf" WorkingDirectory)
+    dirs_same "$pw" "$ws" && { printf '%s\n' "$wf"; return 0; }
+  done < <(cursor_agent_worker_list_plists)
+  return 1
+}
+
+cursor_agent_worker_registered_count() {
+  local n=0 wf
+  while IFS= read -r wf; do
+    [[ -n "$wf" ]] && n=$((n + 1))
+  done < <(cursor_agent_worker_list_plists)
+  printf '%s\n' "$n"
+}
+
+cursor_agent_worker_running_count() {
+  local n=0 wf lb
+  while IFS= read -r wf; do
+    [[ -z "$wf" ]] && continue
+    lb=$(plutil_string "$wf" Label)
+    [[ -n "$lb" ]] || continue
+    launchagent_running "$lb" && n=$((n + 1))
+  done < <(cursor_agent_worker_list_plists)
+  printf '%s\n' "$n"
+}
+
 cursor_worker_process_running() {
   pgrep -f 'agent.*worker' >/dev/null 2>&1 || pgrep -f '/agent worker' >/dev/null 2>&1
 }

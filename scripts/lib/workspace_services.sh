@@ -154,7 +154,7 @@ workspace_listen_map_build() {
   _ws_paths=$(mktemp)
   cat > "$_ws_paths"
   LISTEN_JSON_OUT="$dest" WS_PATHS_FILE="$_ws_paths" python3 <<'PY'
-import json, os, subprocess, sys
+import hashlib, json, os, subprocess, sys, time
 
 def lsof_listen_rows():
     r = subprocess.run(
@@ -567,6 +567,50 @@ else:
         except OSError:
             continue
 paths = list(dict.fromkeys(paths))
+
+
+def _listen_cache_ttl():
+    try:
+        v = float(os.environ.get("CURSOR_DASH_LISTEN_CACHE_SEC", "2.5"))
+    except (TypeError, ValueError):
+        return 2.5
+    return max(0.0, v)
+
+
+def _listen_cache_key(ps):
+    h = hashlib.sha256()
+    for p in sorted(ps):
+        h.update(p.encode("utf-8", errors="replace"))
+        h.update(b"\0")
+    h.update((os.environ.get("CURSOR_DASH_PORT") or "").encode("utf-8"))
+    h.update(b"\0")
+    h.update((os.environ.get("CURSOR_SETUP_ROOT") or "").encode("utf-8"))
+    return h.hexdigest()
+
+
+_listen_ttl = _listen_cache_ttl()
+_outp_pre = os.environ.get("LISTEN_JSON_OUT", "")
+if _outp_pre and _listen_ttl > 0 and paths:
+    _ck = _listen_cache_key(paths)
+    _cp = os.path.join(os.path.expanduser("~"), ".cursor-setup", ".dash-listen-cache.json")
+    _now = time.time()
+    try:
+        if os.path.isfile(_cp):
+            with open(_cp, encoding="utf-8") as _cfp:
+                _cj = json.load(_cfp)
+            if (
+                isinstance(_cj, dict)
+                and _cj.get("k") == _ck
+                and isinstance(_cj.get("t"), (int, float))
+                and _now - float(_cj["t"]) < _listen_ttl
+                and isinstance(_cj.get("r"), dict)
+            ):
+                with open(_outp_pre, "w", encoding="utf-8") as _ofp:
+                    json.dump(_cj["r"], _ofp, ensure_ascii=False)
+                sys.exit(0)
+    except Exception:
+        pass
+
 exec_hints = load_ws_exec_hints(paths)
 listen = lsof_listen_rows()
 pid_to_ports = {}
@@ -634,6 +678,19 @@ for ws in paths:
     result[ws] = sorted(set(result[ws]))
 outp = os.environ.get("LISTEN_JSON_OUT", "")
 if outp:
+    if _listen_ttl > 0 and paths:
+        try:
+            _cdir = os.path.join(os.path.expanduser("~"), ".cursor-setup")
+            os.makedirs(_cdir, exist_ok=True)
+            _cpw = os.path.join(_cdir, ".dash-listen-cache.json")
+            with open(_cpw, "w", encoding="utf-8") as _cfp:
+                json.dump(
+                    {"k": _listen_cache_key(paths), "t": time.time(), "r": result},
+                    _cfp,
+                    ensure_ascii=False,
+                )
+        except Exception:
+            pass
     with open(outp, "w", encoding="utf-8") as fp:
         json.dump(result, fp, ensure_ascii=False)
 PY
