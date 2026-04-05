@@ -41,13 +41,6 @@ If a project is missing, go back to sidebar step **1** (`Add folder in Finder`).
 
 ![Screen C — Other projects expanded](docs/screenshots/03-other-projects-expanded.png)
 
-### Screen D — Workspace actions expanded
-
-Expand a workspace row and click the setup/continue actions for that specific repo.  
-This is where per-project execution starts.
-
-![Screen D — Workspace actions expanded](docs/screenshots/04-workspace-actions-expanded.png)
-
 ### Click order (simple and strict)
 
 | Order | Where to click | Why |
@@ -55,7 +48,7 @@ This is where per-project execution starts.
 | **1** | Sidebar **Add folder in Finder** | Register roots so projects appear. |
 | **2** | Sidebar **Run setup script** | Run full setup path (Tunnel/GitHub/Agent). |
 | **3** | Expand **Quick check** | Confirm top-level integrations are healthy. |
-| **4** | Expand workspace row | Continue setup only for the target repo. |
+| **4** | Open the target workspace row | Continue setup only for the target repo. |
 | **5** | **Refresh** | Re-sync statuses and running ports. |
 | **6** | Sidebar **Stop dashboard server** | Shut down cleanly when done. |
 

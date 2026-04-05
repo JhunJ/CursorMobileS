@@ -171,23 +171,7 @@ def main() -> int:
             pass
         snap(page, "03-other-projects-expanded.png")
 
-        # First workspace: expand top action row (Continue setup, etc.)
-        rf = page.locator("details.repo-fold summary.repo-fold-summary").first
-        try:
-            rf.click(timeout=5000)
-            page.wait_for_timeout(500)
-        except Exception:
-            pass
-        snap(page, "04-workspace-actions-expanded.png")
-
-        # Repo · path · worker block
-        rm = page.locator("details.repo-more summary.repo-more-summary").first
-        try:
-            rm.click(timeout=5000)
-            page.wait_for_timeout(450)
-        except Exception:
-            pass
-        snap(page, "05-repo-path-worker-expanded.png")
+        # Intentionally stop at A/B/C core flow for README brevity.
 
         browser.close()
 
