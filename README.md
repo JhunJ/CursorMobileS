@@ -7,6 +7,10 @@
 
 Turn a Mac (Mac mini on the desk, or any Mac you SSH into) into a repeatable “dev box” profile: install prerequisites, wire GitHub (`gh`), install the Cursor Agent CLI, register a LaunchAgent worker, and optionally expose services through Cloudflare — without memorizing a long checklist.
 
+### On GitHub (find & share)
+
+The [repository About](https://github.com/JhunJ/CursorMobileS) lists **topics** such as `cursor-agent`, `macos`, `github-cli`, `cloudflare-tunnel`, `launchagent`, and `onboarding` so it shows up in GitHub search and Explore. Use **[Discussions](https://github.com/JhunJ/CursorMobileS/discussions)** for Q&A and ideas; use **[Issues](https://github.com/JhunJ/CursorMobileS/issues)** for bugs.
+
 ### Why this feels good in practice
 
 - **Fast onboarding**: one `./setup`, then operate from the dashboard.
