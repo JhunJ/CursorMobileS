@@ -9,8 +9,41 @@ Turn a Mac (Mac mini on the desk, or any Mac you SSH into) into a repeatable “
 
 ---
 
+## What it looks like (your browser, local only)
+
+Below is the **actual dashboard** after you run `./setup` on macOS. Nothing here is hosted on GitHub — it is a page served from **your Mac** at an address like `http://127.0.0.1:58741/`. The **left sidebar** is the recommended order of operations.
+
+![CursorMobileS dashboard: Cursor Setup sidebar (3 steps), quick-check status pills, search, favorites with dev ports, refresh](docs/screenshots/dashboard-overview.png)
+
+### Run in this order (matches **Cursor Setup** in the sidebar)
+
+| Step | What to do | Why |
+|------|------------|-----|
+| **1 — Dev & project folders** | Click **Add folder in Finder** (or edit `~/.cursor-setup/workspaces.txt` manually: one folder path per line). | The dashboard only lists folders it is allowed to see. Without entries, you will not see your projects here. `~/Dev/*` and Git roots under `~/Dev` are also scanned automatically — see [Workspace discovery](#workspace-discovery). |
+| **2 — Tunnel, GitHub, Agent** | Click **Run setup script** (opens Terminal with this repo’s `setup`), or from any clone run `./setup --full-wizard` / pick a project and use **Continue setup** on a card. | This step installs or configures **Homebrew `gh`**, optional **Cloudflare Tunnel**, **Cursor Agent CLI**, and the **LaunchAgent worker** — only for what is still missing. |
+| **3 — This dashboard** | Keep the tab open while you work; use **Stop dashboard server** in the sidebar when you are finished. | The small Python server is what renders this UI. The URL (e.g. `127.0.0.1:58741`) is shown in the sidebar and was printed in Terminal when you started `./setup`. |
+
+**Shortest path to this screen:** clone the repo → `chmod +x setup && ./setup` → open the printed URL. Details: [Quick start](#quick-start).
+
+```mermaid
+flowchart LR
+  S1["1 · Folders\n~/.cursor-setup/workspaces.txt\nor Add folder"] --> S2["2 · Setup\nRun setup script\nTerminal"]
+  S2 --> S3["3 · Dashboard\nhttp://127.0.0.1:port"]
+```
+
+### Reading the rest of the screenshot
+
+- **Top pills (e.g. “Tunnel · GitHub · Agent CLI · Worker”)** — One-glance **quick check** of the four big integrations. Green means the dashboard considers that piece in a good state; follow the main cards or sidebar if something needs action.
+- **Search** — Filters the project list by **name or path** when you have many folders.
+- **Favorites** — Pinned projects; **Running** and a **port** (e.g. `5173`) appear when `workspace-services.jsonl` (or the UI) knows your dev server port — see [Per-project dev commands & ports](#per-project-dev-commands--ports).
+- **Other projects** — Additional discovered workspaces below favorites.
+- **Refresh** — Regenerates status from disk and listening ports without restarting the server.
+
+---
+
 ## Table of contents
 
+- [What it looks like (your browser, local only)](#what-it-looks-like-your-browser-local-only)
 - [Who this is for](#who-this-is-for)
 - [Concept: how the pieces fit together](#concept-how-the-pieces-fit-together)
 - [The local dashboard (what you see on screen)](#the-local-dashboard-what-you-see-on-screen)
@@ -122,8 +155,6 @@ Actions (labels depend on locale) let you **open the folder in Finder**, **copy 
 - Optional **branding** via `CURSOR_DASH_BRAND`.
 - **Repo rename** (GitHub): uses `gh repo rename` and expects `github.com` as `origin`.
 
-> **Screenshots:** For a polished GitHub front page, add 1–2 PNGs under `docs/screenshots/` (dashboard overview + workspace row detail) and link them here. The diagrams above already explain the structure for readers without images.
-
 ---
 
 ## Quick start
@@ -135,16 +166,16 @@ Actions (labels depend on locale) let you **open the folder in Finder**, **copy 
    cd CursorMobileS
    ```
 
-2. **Run** (default = local dashboard):
+2. **Run** (default = local dashboard — the UI in the screenshot above):
 
    ```bash
    chmod +x setup
    ./setup
    ```
 
-3. Open the URL printed in the terminal (usually `http://127.0.0.1:`*port*).
+3. Open the URL printed in the terminal (usually `http://127.0.0.1:`*port*) — the same address appears under **Step 3** in the sidebar.
 
-4. Pick a workspace and use the buttons to **continue setup** in Terminal.
+4. Follow the sidebar order: **folders → setup script → use the dashboard**. To configure one project, find it in the list and use **Continue setup** (or equivalent) so Terminal runs only what is still missing for that folder.
 
 **Full terminal wizard** (no dashboard):
 
