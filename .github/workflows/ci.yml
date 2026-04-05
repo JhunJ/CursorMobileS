@@ -41,7 +41,7 @@ jobs:
 
       - name: ShellCheck
         run: |
-          shellcheck -x setup scripts/*.sh scripts/lib/*.sh
+          shellcheck -S error -x setup scripts/*.sh scripts/lib/*.sh
 
       - name: Smoke checks
         run: |
