@@ -649,7 +649,44 @@ dashboard_emit_html_template() {
   * { box-sizing: border-box; }
   body { margin:0; font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif; background:var(--bg); color:var(--text); font-size:14px; line-height:1.45; }
   .app { display:grid; grid-template-columns:minmax(252px,300px) 1fr; min-height:100vh; }
-  @media (max-width:720px){ .app{ grid-template-columns:1fr;} .sidebar{ border-right:none; border-bottom:1px solid var(--border);} }
+  .app-panels { display:contents; }
+  @media (max-width:720px){
+    html, body { height:100%; }
+    .app {
+      display:flex;
+      flex-direction:column;
+      height:100%;
+      min-height:100vh;
+      min-height:100dvh;
+    }
+    .app-panels {
+      display:flex;
+      flex-direction:row;
+      flex:1;
+      min-height:0;
+      width:100%;
+      overflow-x:auto;
+      overflow-y:hidden;
+      scroll-snap-type:x mandatory;
+      -webkit-overflow-scrolling:touch;
+      overscroll-behavior-x:contain;
+    }
+    .app-panels .sidebar,
+    .app-panels .main {
+      flex:0 0 100%;
+      width:100%;
+      min-width:100%;
+      max-width:100%;
+      height:100%;
+      min-height:0;
+      overflow-y:auto;
+      -webkit-overflow-scrolling:touch;
+      scroll-snap-align:start;
+      scroll-snap-stop:always;
+      box-sizing:border-box;
+    }
+    .sidebar { border-right:1px solid var(--border); border-bottom:none; }
+  }
   .sidebar { background:#010409; border-right:1px solid var(--border); padding:18px 14px 28px; }
   .sidebar h1 { font-size:11px; font-weight:600; margin:0 0 6px; color:var(--muted); text-transform:uppercase; letter-spacing:.06em; }
   .brand { font-size:17px; font-weight:700; margin-bottom:6px; line-height:1.25; }
@@ -850,6 +887,7 @@ dashboard_emit_html_template() {
 </head>
 <body>
 <div class="app">
+  <div class="app-panels">
   <aside class="sidebar">
     __SIDEBAR_EXEC__
   </aside>
@@ -883,7 +921,25 @@ __WORKSPACES__
     </details>
     <footer>__GENERATED_AT__<span class="dash-locale" data-dash-locale="ko"__DL_HID_KO__>__FN_KO__</span><span class="dash-locale" data-dash-locale="en"__DL_HID_EN__>__FN_EN__</span></footer>
   </main>
+  </div>
 </div>
+<script>
+(function () {
+  function dashMobilePanelsShowMain() {
+    var el = document.querySelector(".app-panels");
+    if (!el || !window.matchMedia("(max-width: 720px)").matches) return;
+    var w = el.clientWidth;
+    if (w > 0) el.scrollLeft = w;
+  }
+  function run() {
+    requestAnimationFrame(function () {
+      requestAnimationFrame(dashMobilePanelsShowMain);
+    });
+  }
+  if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", run);
+  else run();
+})();
+</script>
 <script type="application/json" id="dash-fav-boot">__FAV_BOOT_JSON__</script>
 <script type="application/json" id="dash-order-boot">__ORDER_BOOT_JSON__</script>
 __DASH_STAY_SCRIPT__
