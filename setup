@@ -56,6 +56,32 @@ if [[ "${1:-}" == "--_cursor-setup-write-dash" ]]; then
   exit 0
 fi
 
+# 대시보드: 프로젝트 목록 HTML 조각만 (전체 페이지 새로고침 없이 갱신)
+if [[ "${1:-}" == "--_cursor-setup-workspace-rows-html" ]]; then
+  shift
+  _wr_out="${1:-}"
+  [[ -n "$_wr_out" ]] || exit 1
+  # shellcheck source=scripts/lib/common.sh
+  source "$ROOT/scripts/lib/common.sh"
+  # shellcheck source=scripts/lib/status_report.sh
+  source "$ROOT/scripts/lib/status_report.sh"
+  # shellcheck source=scripts/lib/github.sh
+  source "$ROOT/scripts/lib/github.sh"
+  # shellcheck source=scripts/lib/workspace_services.sh
+  source "$ROOT/scripts/lib/workspace_services.sh"
+  # shellcheck source=scripts/lib/dashboard_html.sh
+  source "$ROOT/scripts/lib/dashboard_html.sh"
+  if [[ -f "$ROOT/setup" ]]; then
+    export CURSOR_SETUP_EXEC_HINT="$ROOT/setup"
+  elif [[ -f "$ROOT/MacMini-Cursor-Setup.command" ]]; then
+    export CURSOR_SETUP_EXEC_HINT="$ROOT/MacMini-Cursor-Setup.command"
+  else
+    export CURSOR_SETUP_EXEC_HINT="$ROOT/setup"
+  fi
+  CURSOR_SETUP_HTML_QUIET=1 status_dashboard_write_workspace_rows_only "$_wr_out" || exit 1
+  exit 0
+fi
+
 # 대시보드: GitHub 저장소 이름 변경 (gh repo rename → 원격 URL 자동 갱신)
 if [[ "${1:-}" == "--rename-repo" ]]; then
   shift

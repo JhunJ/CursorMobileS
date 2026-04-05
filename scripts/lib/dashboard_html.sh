@@ -611,6 +611,31 @@ print('svc_exec_path=' + shlex.quote(d.get('exec') or ''))
   done <<<"$(discover_workspace_paths)"
 }
 
+# 인터랙티브 대시보드의 프로젝트 목록(__WORKSPACE__) 조각만 파일로 기록 (전체 HTML 재생성 없이 갱신용)
+status_dashboard_write_workspace_rows_only() {
+  local _w_out="${1:-}"
+  [[ -n "$_w_out" ]] || return 1
+  if ! discover_workspace_paths | grep -q .; then
+    {
+      printf '    <div class="repo">\n'
+      printf '      <div class="repo-name">%s</div>\n' "$(_d "프로젝트 폴더가 없습니다" "No project folders yet")"
+      printf '      <div class="repo-path mono">%s <a href="/refresh">%s</a></div>\n' "$(_d "왼쪽에서 폴더를 추가한 뒤 새로고침하세요." "Add folders on the left, then refresh.")" "$(_d "새로고침" "Refresh")"
+      printf '      <form method="post" action="/workspace-add-folder" class="choice-form" style="margin-top:10px"><button type="submit" class="btn-choice"><span class="btn-choice-main"><span>%s</span><span class="btn-choice-sub">%s</span></span><span class="chev">›</span></button></form>\n' "$(_d "Finder에서 폴더 추가" "Add folder in Finder")" ""
+      printf '    </div>\n'
+    } > "$_w_out"
+  else
+    local listen_json=""
+    if declare -F workspace_listen_map_build >/dev/null 2>&1; then
+      listen_json=$(mktemp)
+      discover_workspace_paths | workspace_listen_map_build "$listen_json"
+      export CURSOR_DASH_LISTEN_MAP="$listen_json"
+    fi
+    dashboard_workspace_rows_html_interactive > "$_w_out"
+    unset CURSOR_DASH_LISTEN_MAP
+    [[ -n "${listen_json:-}" ]] && rm -f "$listen_json"
+  fi
+}
+
 dashboard_emit_html_template() {
   cat <<'DASH_TMPL'
 <!DOCTYPE html>
@@ -1010,8 +1035,8 @@ _dashboard_stay_script_fragment() {
     configureHint: 'Continue in Terminal · refresh when done',
     stopping: 'Stopping server…',
     setupOpened: 'Setup file opened',
-    svcStart: 'Started · refresh to update port status',
-    svcStop: 'Stop requested · reloading soon',
+    svcStart: 'Start requested · updating list…',
+    svcStop: 'Stop requested · updating list…',
     openPort: 'Opening port in browser',
     browserOk: 'Check your browser',
     done: 'Done · refresh if needed',
@@ -1026,14 +1051,39 @@ _dashboard_stay_script_fragment() {
     configureHint: '터미널에서 진행 · 끝나면 새로고침',
     stopping: '서버 종료 중…',
     setupOpened: '셋업 파일을 열었습니다',
-    svcStart: '실행 파일 실행 · 새로고침하면 포트 상태 갱신',
-    svcStop: '포트 종료 요청 · 잠시 후 새로고침',
+    svcStart: '실행 요청 · 프로젝트 목록만 갱신 중…',
+    svcStop: '종료 요청 · 프로젝트 목록만 갱신 중…',
     openPort: '브라우저에서 포트를 엽니다',
     browserOk: '브라우저 확인',
     done: '완료 · 필요 시 새로고침',
     connFail: '연결 실패 · 127.0.0.1 대시보드인지 확인'
   };
   }
+  function dashReplaceWorkspaceRows() {
+    fetch('/fragment/workspace-rows', { credentials: 'same-origin', cache: 'no-store' })
+      .then(function (r) { if (!r.ok) throw new Error('bad'); return r.text(); })
+      .then(function (html) {
+        var fav = document.getElementById('ws-favorites-list');
+        var all = document.getElementById('ws-all-list');
+        if (!fav || !all) throw new Error('no list');
+        fav.innerHTML = '';
+        all.innerHTML = html;
+        if (window.__cursorDashNotifyWorkspaceRowsReplaced) {
+          window.__cursorDashNotifyWorkspaceRowsReplaced();
+        } else {
+          window.location.reload();
+        }
+        var bar2 = document.getElementById('dash-toast');
+        var en = (document.documentElement.lang || '').toLowerCase().indexOf('en') === 0;
+        if (bar2) {
+          bar2.textContent = en ? 'Project list updated' : '프로젝트 목록을 갱신했습니다';
+          bar2.classList.add('visible');
+          setTimeout(function () { bar2.classList.remove('visible'); }, 2400);
+        }
+      })
+      .catch(function () { window.location.reload(); });
+  }
+  window.dashReplaceWorkspaceRows = dashReplaceWorkspaceRows;
   document.addEventListener('submit', function (e) {
     var L = dashToastStrings();
     var f = e.target;
@@ -1083,10 +1133,10 @@ _dashboard_stay_script_fragment() {
           if (bar) bar.textContent = L.setupOpened;
         } else if (act === '/workspace-service-start') {
           if (bar) bar.textContent = L.svcStart;
-          setTimeout(function () { window.location.reload(); }, 1800);
+          setTimeout(dashReplaceWorkspaceRows, 1800);
         } else if (act === '/workspace-service-stop') {
           if (bar) bar.textContent = L.svcStop;
-          setTimeout(function () { window.location.reload(); }, 1600);
+          setTimeout(dashReplaceWorkspaceRows, 1600);
         } else if (act === '/workspace-service-open') {
           if (bar) bar.textContent = L.openPort;
         } else if (act === '/action/open-github' || act === '/action/open-cursor-docs') {
@@ -1295,6 +1345,9 @@ _dashboard_ws_search_fav_script_fragment() {
     applyWorkspaceSearch();
     refreshOrderButtons();
   }
+  window.__cursorDashNotifyWorkspaceRowsReplaced = function () {
+    layoutWorkspaces();
+  };
   function applyWorkspaceSearch() {
     var inp = document.getElementById('ws-search');
     var q = inp && inp.value ? inp.value.trim().toLowerCase() : '';
@@ -1391,7 +1444,7 @@ _dashboard_workspace_exec_script_fragment() {
   }
   var LXen = {
     pickInFinder: 'Pick a file in the Finder window…',
-    savedReload: 'Saved · reloading',
+    savedReload: 'Saved · updating list…',
     unknown: 'Unknown response',
     errRetry: 'Error · refresh and retry',
     uploading: 'Uploading…',
@@ -1401,7 +1454,7 @@ _dashboard_workspace_exec_script_fragment() {
   };
   var LXko = {
     pickInFinder: 'Finder 창에서 실행 파일을 고르세요…',
-    savedReload: '등록됨 · 새로고침합니다',
+    savedReload: '등록됨 · 목록 갱신 중…',
     unknown: '알 수 없는 응답',
     errRetry: '오류 · 새로고침 후 다시',
     uploading: '업로드 중…',
@@ -1445,7 +1498,10 @@ _dashboard_workspace_exec_script_fragment() {
       .then(function (x) {
         if (x.j && x.j.ok) {
           toast(lx().savedReload);
-          setTimeout(function () { window.location.reload(); }, 600);
+          setTimeout(function () {
+            if (window.dashReplaceWorkspaceRows) window.dashReplaceWorkspaceRows();
+            else window.location.reload();
+          }, 600);
         } else {
           toast((x.j && x.j.err) ? x.j.err : (x.ok ? lx().unknown : lx().errRetry));
         }
@@ -1470,7 +1526,10 @@ _dashboard_workspace_exec_script_fragment() {
       .then(function (x) {
         if (x.j && x.j.ok) {
           toast(lx().savedReload);
-          setTimeout(function () { window.location.reload(); }, 600);
+          setTimeout(function () {
+            if (window.dashReplaceWorkspaceRows) window.dashReplaceWorkspaceRows();
+            else window.location.reload();
+          }, 600);
         } else {
           toast((x.j && x.j.err) ? x.j.err : (x.ok ? lx().unknown : lx().uploadFail));
         }
@@ -1672,25 +1731,7 @@ status_dashboard_write_html_interactive() {
   } > "$sfile"
   dashboard_global_cards_html_interactive > "$gfile"
   dashboard_global_actions_html_interactive > "$gafile"
-  if ! discover_workspace_paths | grep -q .; then
-    {
-      printf '    <div class="repo">\n'
-      printf '      <div class="repo-name">%s</div>\n' "$(_d "프로젝트 폴더가 없습니다" "No project folders yet")"
-      printf '      <div class="repo-path mono">%s <a href="/refresh">%s</a></div>\n' "$(_d "왼쪽에서 폴더를 추가한 뒤 새로고침하세요." "Add folders on the left, then refresh.")" "$(_d "새로고침" "Refresh")"
-      printf '      <form method="post" action="/workspace-add-folder" class="choice-form" style="margin-top:10px"><button type="submit" class="btn-choice"><span class="btn-choice-main"><span>%s</span><span class="btn-choice-sub">%s</span></span><span class="chev">›</span></button></form>\n' "$(_d "Finder에서 폴더 추가" "Add folder in Finder")" ""
-      printf '    </div>\n'
-    } > "$wfile"
-  else
-    listen_json=""
-    if declare -F workspace_listen_map_build >/dev/null 2>&1; then
-      listen_json=$(mktemp)
-      discover_workspace_paths | workspace_listen_map_build "$listen_json"
-      export CURSOR_DASH_LISTEN_MAP="$listen_json"
-    fi
-    dashboard_workspace_rows_html_interactive > "$wfile"
-    unset CURSOR_DASH_LISTEN_MAP
-    [[ -n "${listen_json:-}" ]] && rm -f "$listen_json"
-  fi
+  status_dashboard_write_workspace_rows_only "$wfile"
   dashboard_emit_html_template > "$tfile"
   local jfile
   jfile=$(mktemp)

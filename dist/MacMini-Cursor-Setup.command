@@ -1794,6 +1794,31 @@ print('svc_exec_path=' + shlex.quote(d.get('exec') or ''))
   done <<<"$(discover_workspace_paths)"
 }
 
+# 인터랙티브 대시보드의 프로젝트 목록(__WORKSPACE__) 조각만 파일로 기록 (전체 HTML 재생성 없이 갱신용)
+status_dashboard_write_workspace_rows_only() {
+  local _w_out="${1:-}"
+  [[ -n "$_w_out" ]] || return 1
+  if ! discover_workspace_paths | grep -q .; then
+    {
+      printf '    <div class="repo">\n'
+      printf '      <div class="repo-name">%s</div>\n' "$(_d "프로젝트 폴더가 없습니다" "No project folders yet")"
+      printf '      <div class="repo-path mono">%s <a href="/refresh">%s</a></div>\n' "$(_d "왼쪽에서 폴더를 추가한 뒤 새로고침하세요." "Add folders on the left, then refresh.")" "$(_d "새로고침" "Refresh")"
+      printf '      <form method="post" action="/workspace-add-folder" class="choice-form" style="margin-top:10px"><button type="submit" class="btn-choice"><span class="btn-choice-main"><span>%s</span><span class="btn-choice-sub">%s</span></span><span class="chev">›</span></button></form>\n' "$(_d "Finder에서 폴더 추가" "Add folder in Finder")" ""
+      printf '    </div>\n'
+    } > "$_w_out"
+  else
+    local listen_json=""
+    if declare -F workspace_listen_map_build >/dev/null 2>&1; then
+      listen_json=$(mktemp)
+      discover_workspace_paths | workspace_listen_map_build "$listen_json"
+      export CURSOR_DASH_LISTEN_MAP="$listen_json"
+    fi
+    dashboard_workspace_rows_html_interactive > "$_w_out"
+    unset CURSOR_DASH_LISTEN_MAP
+    [[ -n "${listen_json:-}" ]] && rm -f "$listen_json"
+  fi
+}
+
 dashboard_emit_html_template() {
   cat <<'DASH_TMPL'
 <!DOCTYPE html>
@@ -2193,8 +2218,8 @@ _dashboard_stay_script_fragment() {
     configureHint: 'Continue in Terminal · refresh when done',
     stopping: 'Stopping server…',
     setupOpened: 'Setup file opened',
-    svcStart: 'Started · refresh to update port status',
-    svcStop: 'Stop requested · reloading soon',
+    svcStart: 'Start requested · updating list…',
+    svcStop: 'Stop requested · updating list…',
     openPort: 'Opening port in browser',
     browserOk: 'Check your browser',
     done: 'Done · refresh if needed',
@@ -2209,14 +2234,39 @@ _dashboard_stay_script_fragment() {
     configureHint: '터미널에서 진행 · 끝나면 새로고침',
     stopping: '서버 종료 중…',
     setupOpened: '셋업 파일을 열었습니다',
-    svcStart: '실행 파일 실행 · 새로고침하면 포트 상태 갱신',
-    svcStop: '포트 종료 요청 · 잠시 후 새로고침',
+    svcStart: '실행 요청 · 프로젝트 목록만 갱신 중…',
+    svcStop: '종료 요청 · 프로젝트 목록만 갱신 중…',
     openPort: '브라우저에서 포트를 엽니다',
     browserOk: '브라우저 확인',
     done: '완료 · 필요 시 새로고침',
     connFail: '연결 실패 · 127.0.0.1 대시보드인지 확인'
   };
   }
+  function dashReplaceWorkspaceRows() {
+    fetch('/fragment/workspace-rows', { credentials: 'same-origin', cache: 'no-store' })
+      .then(function (r) { if (!r.ok) throw new Error('bad'); return r.text(); })
+      .then(function (html) {
+        var fav = document.getElementById('ws-favorites-list');
+        var all = document.getElementById('ws-all-list');
+        if (!fav || !all) throw new Error('no list');
+        fav.innerHTML = '';
+        all.innerHTML = html;
+        if (window.__cursorDashNotifyWorkspaceRowsReplaced) {
+          window.__cursorDashNotifyWorkspaceRowsReplaced();
+        } else {
+          window.location.reload();
+        }
+        var bar2 = document.getElementById('dash-toast');
+        var en = (document.documentElement.lang || '').toLowerCase().indexOf('en') === 0;
+        if (bar2) {
+          bar2.textContent = en ? 'Project list updated' : '프로젝트 목록을 갱신했습니다';
+          bar2.classList.add('visible');
+          setTimeout(function () { bar2.classList.remove('visible'); }, 2400);
+        }
+      })
+      .catch(function () { window.location.reload(); });
+  }
+  window.dashReplaceWorkspaceRows = dashReplaceWorkspaceRows;
   document.addEventListener('submit', function (e) {
     var L = dashToastStrings();
     var f = e.target;
@@ -2266,10 +2316,10 @@ _dashboard_stay_script_fragment() {
           if (bar) bar.textContent = L.setupOpened;
         } else if (act === '/workspace-service-start') {
           if (bar) bar.textContent = L.svcStart;
-          setTimeout(function () { window.location.reload(); }, 1800);
+          setTimeout(dashReplaceWorkspaceRows, 1800);
         } else if (act === '/workspace-service-stop') {
           if (bar) bar.textContent = L.svcStop;
-          setTimeout(function () { window.location.reload(); }, 1600);
+          setTimeout(dashReplaceWorkspaceRows, 1600);
         } else if (act === '/workspace-service-open') {
           if (bar) bar.textContent = L.openPort;
         } else if (act === '/action/open-github' || act === '/action/open-cursor-docs') {
@@ -2478,6 +2528,9 @@ _dashboard_ws_search_fav_script_fragment() {
     applyWorkspaceSearch();
     refreshOrderButtons();
   }
+  window.__cursorDashNotifyWorkspaceRowsReplaced = function () {
+    layoutWorkspaces();
+  };
   function applyWorkspaceSearch() {
     var inp = document.getElementById('ws-search');
     var q = inp && inp.value ? inp.value.trim().toLowerCase() : '';
@@ -2574,7 +2627,7 @@ _dashboard_workspace_exec_script_fragment() {
   }
   var LXen = {
     pickInFinder: 'Pick a file in the Finder window…',
-    savedReload: 'Saved · reloading',
+    savedReload: 'Saved · updating list…',
     unknown: 'Unknown response',
     errRetry: 'Error · refresh and retry',
     uploading: 'Uploading…',
@@ -2584,7 +2637,7 @@ _dashboard_workspace_exec_script_fragment() {
   };
   var LXko = {
     pickInFinder: 'Finder 창에서 실행 파일을 고르세요…',
-    savedReload: '등록됨 · 새로고침합니다',
+    savedReload: '등록됨 · 목록 갱신 중…',
     unknown: '알 수 없는 응답',
     errRetry: '오류 · 새로고침 후 다시',
     uploading: '업로드 중…',
@@ -2628,7 +2681,10 @@ _dashboard_workspace_exec_script_fragment() {
       .then(function (x) {
         if (x.j && x.j.ok) {
           toast(lx().savedReload);
-          setTimeout(function () { window.location.reload(); }, 600);
+          setTimeout(function () {
+            if (window.dashReplaceWorkspaceRows) window.dashReplaceWorkspaceRows();
+            else window.location.reload();
+          }, 600);
         } else {
           toast((x.j && x.j.err) ? x.j.err : (x.ok ? lx().unknown : lx().errRetry));
         }
@@ -2653,7 +2709,10 @@ _dashboard_workspace_exec_script_fragment() {
       .then(function (x) {
         if (x.j && x.j.ok) {
           toast(lx().savedReload);
-          setTimeout(function () { window.location.reload(); }, 600);
+          setTimeout(function () {
+            if (window.dashReplaceWorkspaceRows) window.dashReplaceWorkspaceRows();
+            else window.location.reload();
+          }, 600);
         } else {
           toast((x.j && x.j.err) ? x.j.err : (x.ok ? lx().unknown : lx().uploadFail));
         }
@@ -2855,25 +2914,7 @@ status_dashboard_write_html_interactive() {
   } > "$sfile"
   dashboard_global_cards_html_interactive > "$gfile"
   dashboard_global_actions_html_interactive > "$gafile"
-  if ! discover_workspace_paths | grep -q .; then
-    {
-      printf '    <div class="repo">\n'
-      printf '      <div class="repo-name">%s</div>\n' "$(_d "프로젝트 폴더가 없습니다" "No project folders yet")"
-      printf '      <div class="repo-path mono">%s <a href="/refresh">%s</a></div>\n' "$(_d "왼쪽에서 폴더를 추가한 뒤 새로고침하세요." "Add folders on the left, then refresh.")" "$(_d "새로고침" "Refresh")"
-      printf '      <form method="post" action="/workspace-add-folder" class="choice-form" style="margin-top:10px"><button type="submit" class="btn-choice"><span class="btn-choice-main"><span>%s</span><span class="btn-choice-sub">%s</span></span><span class="chev">›</span></button></form>\n' "$(_d "Finder에서 폴더 추가" "Add folder in Finder")" ""
-      printf '    </div>\n'
-    } > "$wfile"
-  else
-    listen_json=""
-    if declare -F workspace_listen_map_build >/dev/null 2>&1; then
-      listen_json=$(mktemp)
-      discover_workspace_paths | workspace_listen_map_build "$listen_json"
-      export CURSOR_DASH_LISTEN_MAP="$listen_json"
-    fi
-    dashboard_workspace_rows_html_interactive > "$wfile"
-    unset CURSOR_DASH_LISTEN_MAP
-    [[ -n "${listen_json:-}" ]] && rm -f "$listen_json"
-  fi
+  status_dashboard_write_workspace_rows_only "$wfile"
   dashboard_emit_html_template > "$tfile"
   local jfile
   jfile=$(mktemp)
@@ -3009,7 +3050,7 @@ _dashboard_server_write_py() {
   python3 <<'PY' > "$out"
 import textwrap, sys
 code = r'''
-import os, re, secrets, shutil, subprocess, sys, threading, time, urllib.parse, json, pathlib
+import os, re, secrets, shutil, subprocess, sys, threading, time, urllib.parse, json, pathlib, tempfile
 from http.server import HTTPServer, BaseHTTPRequestHandler
 import shlex
 
@@ -3376,6 +3417,106 @@ def _safe_filename(name):
     return name or "exec-file"
 
 
+_STASH_CWD_MARKER = b"cursor-setup: stashed exec project cwd"
+
+
+def _line_is_cd_to_script_dir(line):
+    """macOS .command 등이 `cd "$(dirname "$0")"` 로 스태시 디렉터리로 이동하는 경우."""
+    s = line.strip()
+    if not s or s.startswith("#"):
+        return False
+    if not s.startswith("cd ") and not s.startswith("cd\t"):
+        return False
+    if "${0%/*}" in s:
+        return True
+    if "dirname" in s and ("$0" in s or "${0" in s):
+        return True
+    if "dirname" in s and "BASH_SOURCE" in s:
+        return True
+    return False
+
+
+def _stash_shell_with_project_root(raw, ws_abs):
+    """스태시 경로에 둔 스크립트가 dirname($0) 으로 잘못된 cwd 로 가지 않도록 보정."""
+    if _STASH_CWD_MARKER in raw:
+        return raw
+    if b"\x00" in raw[:8192]:
+        return raw
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        return raw
+    head = text.lstrip("\ufeff")[:800].lower()
+    if not any(
+        h in head
+        for h in (
+            "#!/bin/bash",
+            "#!/usr/bin/bash",
+            "#!/bin/sh",
+            "#!/usr/bin/sh",
+            "#!/usr/bin/env bash",
+            "#!/usr/bin/env sh",
+        )
+    ):
+        return raw
+    lines = text.splitlines(keepends=True)
+    if not lines:
+        return raw
+    out = []
+    i = 0
+    if lines[0].lstrip("\ufeff").startswith("#!"):
+        out.append(lines[0])
+        i = 1
+    else:
+        out.append("#!/usr/bin/env bash\n")
+    root_lit = shlex.quote(ws_abs)
+    out.append(
+        "\n# "
+        + _STASH_CWD_MARKER.decode("ascii")
+        + "\nexport CURSOR_SETUP_PROJECT_ROOT="
+        + root_lit
+        + "\ncd \"$CURSOR_SETUP_PROJECT_ROOT\" || exit 1\n"
+    )
+    dropped = 0
+    max_drop = 12
+    scan_limit = min(len(lines), 48)
+    while i < len(lines):
+        if i < scan_limit and dropped < max_drop and _line_is_cd_to_script_dir(lines[i]):
+            out.append("# (cursor-setup) removed cd to script dir: " + lines[i].strip() + "\n")
+            dropped += 1
+            i += 1
+            continue
+        out.append(lines[i])
+        i += 1
+    return "".join(out).encode("utf-8")
+
+
+def _workspace_exec_stash_dir():
+    return os.path.realpath(str(pathlib.Path.home() / ".cursor-setup" / "workspace-exec-stash"))
+
+
+def _maybe_patch_stashed_exec_on_disk(script_path, ws_rp):
+    """이미 스태시에만 있는 옛 스크립트를 첫 실행 시 한 번 패치."""
+    try:
+        rp = os.path.realpath(script_path)
+    except OSError:
+        return
+    sd = _workspace_exec_stash_dir()
+    if not rp.startswith(sd + os.sep) or not os.path.isfile(rp):
+        return
+    try:
+        raw = pathlib.Path(rp).read_bytes()
+    except OSError:
+        return
+    new = _stash_shell_with_project_root(raw, os.path.realpath(ws_rp))
+    if new != raw:
+        try:
+            pathlib.Path(rp).write_bytes(new)
+            os.chmod(rp, 0o755)
+        except OSError:
+            pass
+
+
 def _stash_exec_file(ws_real, filename, raw):
     ws_path = pathlib.Path(ws_real).resolve()
     try:
@@ -3399,7 +3540,8 @@ def _stash_exec_file(ws_real, filename, raw):
     while dest.exists():
         n += 1
         dest = stash / (ws_tag + "_" + str(n) + "_" + base)
-    dest.write_bytes(raw)
+    to_write = _stash_shell_with_project_root(raw, str(ws_path))
+    dest.write_bytes(to_write)
     try:
         suf = dest.suffix.lower()
         if suf in (".command", ".sh", ".tool") or dest.name.endswith(".command"):
@@ -3712,6 +3854,39 @@ class H(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(body)
             return
+        if p == "/fragment/workspace-rows":
+            setup = os.environ["CURSOR_SETUP_SCRIPT"]
+            env = os.environ.copy()
+            env["CURSOR_DASH_LANG"] = self._dash_lang_from_headers()
+            fd, tmp = tempfile.mkstemp(suffix=".html")
+            os.close(fd)
+            try:
+                r = subprocess.run(
+                    [setup, "--_cursor-setup-workspace-rows-html", tmp],
+                    env=env,
+                    capture_output=True,
+                    timeout=120,
+                )
+                if r.returncode != 0:
+                    self.send_error(500)
+                    return
+                with open(tmp, "rb") as fp:
+                    body = fp.read()
+            except (OSError, subprocess.TimeoutExpired):
+                self.send_error(500)
+                return
+            finally:
+                try:
+                    os.unlink(tmp)
+                except OSError:
+                    pass
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
         self.send_error(404)
 
     def do_POST(self):
@@ -3835,6 +4010,8 @@ class H(BaseHTTPRequestHandler):
                 return
             # exec 가 setup(또는 스태시 복사본)만 가리키면 인자 없이 또 HTTP 대시보드를 띄워 포트가 충돌함 → 터미널 --workspace 만 연다.
             invoked = _bash_invocation_script_path(sh)
+            if invoked:
+                _maybe_patch_stashed_exec_on_disk(invoked, rp)
             if invoked and _path_is_cursor_setup_entrypoint(invoked):
                 real_setup = _workspace_setup_script_path(rp)
                 if real_setup:
@@ -5063,6 +5240,20 @@ if [[ "${1:-}" == "--_cursor-setup-write-dash" ]]; then
   if [[ -n "${CURSOR_DASH_ALLOWLIST:-}" ]]; then
     discover_workspace_paths > "$CURSOR_DASH_ALLOWLIST"
   fi
+  exit 0
+fi
+if [[ "${1:-}" == "--_cursor-setup-workspace-rows-html" ]]; then
+  shift
+  _wr_out="${1:-}"
+  [[ -n "$_wr_out" ]] || exit 1
+  if [[ -f "$ROOT/setup" ]]; then
+    export CURSOR_SETUP_EXEC_HINT="$ROOT/setup"
+  elif [[ -f "$ROOT/MacMini-Cursor-Setup.command" ]]; then
+    export CURSOR_SETUP_EXEC_HINT="$ROOT/MacMini-Cursor-Setup.command"
+  else
+    export CURSOR_SETUP_EXEC_HINT="$ROOT/MacMini-Cursor-Setup.command"
+  fi
+  CURSOR_SETUP_HTML_QUIET=1 status_dashboard_write_workspace_rows_only "$_wr_out" || exit 1
   exit 0
 fi
 if [[ "${1:-}" == "--rename-repo" ]]; then

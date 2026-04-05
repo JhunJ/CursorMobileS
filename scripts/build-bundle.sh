@@ -68,6 +68,20 @@ if [[ "${1:-}" == "--_cursor-setup-write-dash" ]]; then
   fi
   exit 0
 fi
+if [[ "${1:-}" == "--_cursor-setup-workspace-rows-html" ]]; then
+  shift
+  _wr_out="${1:-}"
+  [[ -n "$_wr_out" ]] || exit 1
+  if [[ -f "$ROOT/setup" ]]; then
+    export CURSOR_SETUP_EXEC_HINT="$ROOT/setup"
+  elif [[ -f "$ROOT/MacMini-Cursor-Setup.command" ]]; then
+    export CURSOR_SETUP_EXEC_HINT="$ROOT/MacMini-Cursor-Setup.command"
+  else
+    export CURSOR_SETUP_EXEC_HINT="$ROOT/MacMini-Cursor-Setup.command"
+  fi
+  CURSOR_SETUP_HTML_QUIET=1 status_dashboard_write_workspace_rows_only "$_wr_out" || exit 1
+  exit 0
+fi
 if [[ "${1:-}" == "--rename-repo" ]]; then
   shift
   _rr_path="${1:-}"
