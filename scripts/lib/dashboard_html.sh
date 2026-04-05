@@ -472,9 +472,20 @@ print('svc_exec_path=' + shlex.quote(d.get('exec') or ''))
     fi
     stop_port="$svc_port"
     [[ -z "$stop_port" && -n "$primary_auto" ]] && stop_port="$primary_auto"
+    # 이 레포에서 ./setup 대시보드만 떠 있고 lsof 가 PID↔경로를 못 잡는 경우(파이썬 cwd=홈 등)에도 표시
+    repo_dashboard_listen=0
+    if [[ -n "${CURSOR_SETUP_ROOT:-}" && -n "${CURSOR_DASH_PORT:-}" ]]; then
+      _dash_csr="$(cd "${CURSOR_SETUP_ROOT}" 2>/dev/null && pwd -P)" || _dash_csr=""
+      _dash_wsr="$(cd "$ws" 2>/dev/null && pwd -P)" || _dash_wsr=""
+      if [[ -n "$_dash_csr" && "$_dash_csr" == "$_dash_wsr" ]] && workspace_service_port_listening "${CURSOR_DASH_PORT}"; then
+        repo_dashboard_listen=1
+      fi
+    fi
+    open_bind_port="$stop_port"
+    [[ -z "$open_bind_port" && "$repo_dashboard_listen" -eq 1 ]] && open_bind_port="${CURSOR_DASH_PORT}"
     open_disabled=""
     open_title=""
-    if [[ -z "$stop_port" ]]; then
+    if [[ -z "$open_bind_port" ]]; then
       open_disabled=" disabled"
       open_title=" title=\"$(_d "열 포트 없음" "No port")\""
     fi
@@ -513,6 +524,9 @@ print('svc_exec_path=' + shlex.quote(d.get('exec') or ''))
       elif [[ "$svc_on" -eq 1 ]]; then
         fold_stat_class="repo-fold-stat ok"
         fold_stat_text="$(_d "실행 중" "Running")"
+      elif [[ "$repo_dashboard_listen" -eq 1 ]]; then
+        fold_stat_class="repo-fold-stat ok"
+        fold_stat_text="$(_d "브라우저 대시보드" "Browser dashboard") · ${CURSOR_DASH_PORT}"
       elif [[ -n "$svc_port" ]]; then
         fold_stat_class="repo-fold-stat warn"
         fold_stat_text="$(_d "포트" "Port") ${svc_port} · $(_d "대기" "idle")"
@@ -571,6 +585,8 @@ print('svc_exec_path=' + shlex.quote(d.get('exec') or ''))
         printf ' <span class="ws-svc-state"><span class="dot ok"></span>%s · %s</span>\n' "$(_d "실행 중" "Running")" "$(html_escape "$running_ports_label")"
       elif [[ "$svc_on" -eq 1 ]]; then
         printf ' <span class="ws-svc-state"><span class="dot ok"></span>%s</span>\n' "$(_d "실행 중" "Running")"
+      elif [[ "$repo_dashboard_listen" -eq 1 ]]; then
+        printf ' <span class="ws-svc-state"><span class="dot ok"></span>%s · %s %s</span>\n' "$(_d "브라우저 대시보드" "Browser dashboard")" "$(html_escape "${CURSOR_DASH_PORT}")" "$(_d "(dev 서버 아님)" "(not dev server)")"
       elif [[ -n "$svc_port" ]]; then
         printf ' <span class="ws-svc-state"><span class="dot bad"></span>%s %s %s</span>\n' "$(_d "포트" "Port")" "$(html_escape "$svc_port")" "$(_d "대기" "idle")"
       else
@@ -600,8 +616,10 @@ print('svc_exec_path=' + shlex.quote(d.get('exec') or ''))
       printf '          <form method="post" action="/workspace-service-stop"><input type="hidden" name="path" value="%s" />' "$(html_escape "$ws")"
       printf '<button type="submit" class="btn btn-secondary btn-small"%s%s>%s</button></form>\n' "$stop_disabled" "$stop_title" "$(_d "포트 끄기" "Stop port")"
       printf '          <form method="post" action="/workspace-service-open"><input type="hidden" name="path" value="%s" />' "$(html_escape "$ws")"
+      [[ -n "$open_bind_port" ]] && printf '<input type="hidden" name="port" value="%s" />' "$(html_escape "$open_bind_port")"
       printf '<button type="submit" class="btn btn-secondary btn-small"%s%s>%s</button></form>\n' "$open_disabled" "$open_title" "$(_d "열기" "Open")"
       printf '          <form method="post" action="/workspace-service-open"><input type="hidden" name="path" value="%s" /><input type="hidden" name="network" value="1" />' "$(html_escape "$ws")"
+      [[ -n "$open_bind_port" ]] && printf '<input type="hidden" name="port" value="%s" />' "$(html_escape "$open_bind_port")"
       printf '<button type="submit" class="btn btn-secondary btn-small"%s%s>%s</button></form>\n' "$open_disabled" "$open_title" "$(_d "LAN 열기" "Open on LAN")"
     else
       _spf_rest="${stop_forms_ports},"
