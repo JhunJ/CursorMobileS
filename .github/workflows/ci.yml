@@ -1,0 +1,51 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  lint-and-smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+
+      - name: Install shellcheck
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y shellcheck
+
+      - name: Make scripts executable
+        run: |
+          chmod +x setup
+          chmod +x scripts/*.sh
+          chmod +x scripts/lib/*.sh
+
+      - name: Bash syntax check
+        run: |
+          bash -n setup
+          while IFS= read -r f; do
+            bash -n "$f"
+          done < <(ls scripts/*.sh scripts/lib/*.sh)
+
+      - name: ShellCheck
+        run: |
+          shellcheck setup
+          shellcheck scripts/*.sh
+          shellcheck scripts/lib/*.sh
+
+      - name: Smoke checks
+        run: |
+          chmod +x scripts/ci-smoke.sh scripts/verify-readme-assets.sh
+          ./scripts/ci-smoke.sh

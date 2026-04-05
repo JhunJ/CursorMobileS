@@ -4,6 +4,8 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Platform](https://img.shields.io/badge/platform-macOS-lightgrey.svg)]()
+[![CI](https://github.com/JhunJ/CursorMobileS/actions/workflows/ci.yml/badge.svg)](https://github.com/JhunJ/CursorMobileS/actions/workflows/ci.yml)
+[![Release Bundle](https://github.com/JhunJ/CursorMobileS/actions/workflows/release.yml/badge.svg)](https://github.com/JhunJ/CursorMobileS/actions/workflows/release.yml)
 
 Turn a Mac (Mac mini on the desk, or any Mac you SSH into) into a repeatable “dev box” profile: install prerequisites, wire GitHub (`gh`), install the Cursor Agent CLI, register a LaunchAgent worker, and optionally expose services through Cloudflare — without memorizing a long checklist.
 
@@ -17,6 +19,12 @@ The [repository About](https://github.com/JhunJ/CursorMobileS) lists **topics** 
 - **Idempotent flow**: rerun safely; already-done steps are skipped.
 - **Per-workspace continuation**: fix only what is missing for that folder.
 - **Secure-by-default dashboard**: localhost bind (`127.0.0.1`) unless you explicitly enable LAN exposure.
+
+### Project trust signals
+
+- CI runs shell syntax, shellcheck, smoke checks, and README asset validation on PR/push.
+- Tagged releases (`v*`) publish the bundle and SHA-256 checksums automatically.
+- Security policy, architecture overview, contribution guide, issue templates, and PR template are included.
 
 ---
 
@@ -106,8 +114,12 @@ flowchart LR
 - [Per-project dev commands & ports](#per-project-dev-commands--ports)
 - [Command-line usage](#command-line-usage)
 - [Environment variables](#environment-variables)
+- [Quality and release process](#quality-and-release-process)
 - [Security & privacy](#security--privacy)
 - [Security policy](SECURITY.md)
+- [Architecture](docs/ARCHITECTURE.md)
+- [Contributing](CONTRIBUTING.md)
+- [Changelog](CHANGELOG.md)
 - [Requirements](#requirements)
 - [License](#license)
 
@@ -327,6 +339,20 @@ The dashboard can also help **register** entries; they are merged into this JSON
 | `CURSOR_DASH_BRAND` | Custom title string in the dashboard header. |
 | `CURSOR_SETUP_DEFAULT_WORKSPACE` | Default folder for status and some flows. |
 | `CURSOR_SETUP_FAST_PROMPTS` | `1` (default) skips many terminal prompts; `0` with `--interactive` asks more. |
+
+---
+
+## Quality and release process
+
+- **CI** (`.github/workflows/ci.yml`): `bash -n`, `shellcheck`, smoke checks, and README asset checks.
+- **Release** (`.github/workflows/release.yml`): on `v*` tags, builds `dist/MacMini-Cursor-Setup.command` and publishes `SHA256SUMS.txt`.
+- **Bundle integrity rule**: if you change `setup`, `scripts/lib/*`, or templates, run `./scripts/build-bundle.sh` before commit.
+
+Quick local validation:
+
+```bash
+./scripts/ci-smoke.sh
+```
 
 ---
 

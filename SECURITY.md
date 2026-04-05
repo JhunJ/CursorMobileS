@@ -23,6 +23,13 @@ If you find a security issue, please avoid opening a public issue with exploit d
 
 1. Provide a concise report with reproduction steps, impact, and suggested fix.
 2. Include affected file paths and environment assumptions.
-3. Send privately to maintainers through your preferred private channel.
+3. Report privately through [GitHub Security Advisories](https://github.com/JhunJ/CursorMobileS/security/advisories/new) when possible.
+4. If advisories are not available in your context, contact maintainers through a private channel and include a secure reply address.
 
-We will acknowledge the report, validate impact, and coordinate a fix + disclosure timing.
+## Response targets
+
+- Initial acknowledgement: within 72 hours
+- Triage update: within 7 days
+- Coordinated disclosure target: after fix availability and maintainer agreement
+
+We will acknowledge reports, validate impact, coordinate fixes, and avoid publishing sensitive exploit details before mitigation is available.
