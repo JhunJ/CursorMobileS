@@ -152,6 +152,7 @@ def main() -> int:
         )
         page.wait_for_timeout(900)
         snap(page, "01-dashboard-overview-en.png")
+        snap(page, "dashboard-en-full.png", full=True)
 
         # Quick check → global status cards
         qc = page.locator("details.quick-check summary").first

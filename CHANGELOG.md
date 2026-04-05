@@ -4,6 +4,10 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Removed
+
+- Cloudflare Tunnel / `cloudflared` integration, dashboard Tunnel UI, and setup flags that referenced it. Local dashboard and docs now describe GitHub, Agent CLI, and Worker only.
+
 ### Added
 
 - GitHub Actions CI workflow for shell syntax, shellcheck, smoke checks, and README asset validation.
