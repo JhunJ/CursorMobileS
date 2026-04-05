@@ -35,7 +35,7 @@ _dashboard_server_write_py() {
   python3 <<'PY' > "$out"
 import textwrap, sys
 code = r'''
-import os, re, secrets, subprocess, sys, threading, time, urllib.parse, json, pathlib
+import os, re, secrets, shutil, subprocess, sys, threading, time, urllib.parse, json, pathlib
 from http.server import HTTPServer, BaseHTTPRequestHandler
 import shlex
 
@@ -559,7 +559,7 @@ class H(BaseHTTPRequestHandler):
             # 브라우저가 응답 도중 연결을 끊는 경우(새로고침/탭 닫기)는 정상 동작으로 본다.
             return
 
-    def _run_term(self, script_body, auto_close=False):
+    def _run_term(self, script_body, auto_close=False, activate_terminal=True):
         if auto_close:
             script_body = script_body + "; exit"
         wrapped = "bash -lc " + shlex.quote(script_body)
@@ -568,10 +568,11 @@ class H(BaseHTTPRequestHandler):
             return '"' + s.replace("\\", "\\\\").replace('"', '\\"') + '"'
 
         # 앞으로 가져오기 — 대시보드 버튼 후 터미널이 뒤에만 뜨는 문제 완화
-        subprocess.run(
-            ["osascript", "-e", 'tell application "Terminal" to activate'],
-            check=False,
-        )
+        if activate_terminal:
+            subprocess.run(
+                ["osascript", "-e", 'tell application "Terminal" to activate'],
+                check=False,
+            )
         scpt = "tell application \"Terminal\" to do script " + aq(wrapped)
         subprocess.run(["osascript", "-e", scpt], check=False)
 
@@ -791,43 +792,6 @@ class H(BaseHTTPRequestHandler):
             return
         if p == "/full-wizard":
             inner = "cd {} && /bin/bash {} --full-wizard".format(shlex.quote(root), shlex.quote(setup))
-            self._run_term(inner, auto_close=False)
-            self.send_response(200)
-            self.send_header("Content-Type", "text/html; charset=utf-8")
-            self.end_headers()
-            self.wfile.write(self._html_ok())
-            return
-        if p == "/tunnel":
-            inner = "cd {} && /bin/bash {} --tunnel-only".format(shlex.quote(root), shlex.quote(setup))
-            self._run_term(inner, auto_close=False)
-            self.send_response(200)
-            self.send_header("Content-Type", "text/html; charset=utf-8")
-            self.end_headers()
-            self.wfile.write(self._html_ok())
-            return
-        if p == "/tunnel-workspace":
-            allow_path = os.environ.get("CURSOR_DASH_ALLOWLIST", "")
-            if allow_path:
-                subprocess.run(
-                    [setup, "--_cursor-setup-write-allowlist", allow_path],
-                    check=False,
-                )
-            length = int(self.headers.get("Content-Length", "0"))
-            body = self.rfile.read(length).decode("utf-8", errors="replace")
-            q = urllib.parse.parse_qs(body)
-            raw = (q.get("path") or [""])[0].strip()
-            if not self._allow_ok(raw):
-                self.send_response(403)
-                self.send_header("Content-Type", "text/html; charset=utf-8")
-                self.end_headers()
-                self.wfile.write(self._html_denied())
-                return
-            rp = os.path.realpath(raw)
-            inner = "export CURSOR_SETUP_TUNNEL_WORKSPACE={}; export CURSOR_SETUP_CF_FORCE=1; cd {} && /bin/bash {} --tunnel-only".format(
-                shlex.quote(rp),
-                shlex.quote(root),
-                shlex.quote(setup),
-            )
             self._run_term(inner, auto_close=False)
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
@@ -1290,20 +1254,6 @@ class H(BaseHTTPRequestHandler):
                 except OSError:
                     pass
                 inner = "open -e " + shlex.quote(str(jf))
-                self._run_term(inner, auto_close=True)
-                self.send_response(200)
-                self.send_header("Content-Type", "text/html; charset=utf-8")
-                self.end_headers()
-                self.wfile.write(self._html_ok())
-                return
-            if p == "/action/open-cloudflared-config":
-                cf = pathlib.Path.home() / ".cloudflared" / "config.yml"
-                try:
-                    cf.parent.mkdir(parents=True, exist_ok=True)
-                    cf.touch(exist_ok=True)
-                except OSError:
-                    pass
-                inner = "open -e " + shlex.quote(str(cf))
                 self._run_term(inner, auto_close=True)
                 self.send_response(200)
                 self.send_header("Content-Type", "text/html; charset=utf-8")

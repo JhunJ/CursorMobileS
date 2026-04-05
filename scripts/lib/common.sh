@@ -2,10 +2,12 @@
 # 공통: 로깅, 프롬프트, dry-run, 경로 유틸 (bash 3.2 호환)
 
 CURSOR_SETUP_DRY_RUN="${CURSOR_SETUP_DRY_RUN:-0}"
-# CURSOR_SETUP_WITH_CF: 비어 있으면 preflight에서 물어봄. 1=포함, 0=건너뜀.
 # CURSOR_SETUP_FAST_PROMPTS: 1이면 질문 없이 각 프롬프트의 기본값만 사용 (setup에서 기본 1, --interactive 로 끔)
 
-log_info() { printf '%s\n' "[정보] $*"; }
+# stdout 은 파이프·$(…) 캡처용으로 비워 두고, 안내는 stderr 로만 출력합니다.
+# (예: CURSOR_SETUP_FAST_PROMPTS=1 일 때 prompt_with_default 가 log_info 와 기본값을 같이 stdout 에 내면
+#     hostname="$(prompt_with_default …)" 등에 잘못된 다줄 문자열이 섞이지 않게 합니다.)
+log_info() { printf '%s\n' "[정보] $*" >&2; }
 log_warn() { printf '%s\n' "[경고] $*" >&2; }
 log_err() { printf '%s\n' "[오류] $*" >&2; }
 
@@ -141,10 +143,6 @@ expand_tilde() {
   printf '%s\n' "$p"
 }
 
-cloudflared_cert_ok() {
-  [[ -f "$HOME/.cloudflared/cert.pem" ]]
-}
-
 plutil_string() {
   local plist="$1"
   local key="$2"
@@ -239,10 +237,6 @@ cursor_worker_process_running() {
   pgrep -f 'agent.*worker' >/dev/null 2>&1 || pgrep -f '/agent worker' >/dev/null 2>&1
 }
 
-cloudflared_process_running() {
-  pgrep -x cloudflared >/dev/null 2>&1 || pgrep -f 'cloudflared tunnel' >/dev/null 2>&1
-}
-
 launchagent_running() {
   local label="$1"
   local out
@@ -251,7 +245,6 @@ launchagent_running() {
     return 0
   fi
   [[ "$label" == "com.cursor.agent.worker" ]] && cursor_worker_process_running && return 0
-  [[ "$label" == "com.cloudflared.tunnel" ]] && cloudflared_process_running && return 0
   return 1
 }
 

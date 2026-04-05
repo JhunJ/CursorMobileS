@@ -16,10 +16,12 @@ export CURSOR_SETUP_ROOT="$ROOT"
 # 공통: 로깅, 프롬프트, dry-run, 경로 유틸 (bash 3.2 호환)
 
 CURSOR_SETUP_DRY_RUN="${CURSOR_SETUP_DRY_RUN:-0}"
-# CURSOR_SETUP_WITH_CF: 비어 있으면 preflight에서 물어봄. 1=포함, 0=건너뜀.
 # CURSOR_SETUP_FAST_PROMPTS: 1이면 질문 없이 각 프롬프트의 기본값만 사용 (setup에서 기본 1, --interactive 로 끔)
 
-log_info() { printf '%s\n' "[정보] $*"; }
+# stdout 은 파이프·$(…) 캡처용으로 비워 두고, 안내는 stderr 로만 출력합니다.
+# (예: CURSOR_SETUP_FAST_PROMPTS=1 일 때 prompt_with_default 가 log_info 와 기본값을 같이 stdout 에 내면
+#     hostname="$(prompt_with_default …)" 등에 잘못된 다줄 문자열이 섞이지 않게 합니다.)
+log_info() { printf '%s\n' "[정보] $*" >&2; }
 log_warn() { printf '%s\n' "[경고] $*" >&2; }
 log_err() { printf '%s\n' "[오류] $*" >&2; }
 
@@ -155,10 +157,6 @@ expand_tilde() {
   printf '%s\n' "$p"
 }
 
-cloudflared_cert_ok() {
-  [[ -f "$HOME/.cloudflared/cert.pem" ]]
-}
-
 plutil_string() {
   local plist="$1"
   local key="$2"
@@ -253,10 +251,6 @@ cursor_worker_process_running() {
   pgrep -f 'agent.*worker' >/dev/null 2>&1 || pgrep -f '/agent worker' >/dev/null 2>&1
 }
 
-cloudflared_process_running() {
-  pgrep -x cloudflared >/dev/null 2>&1 || pgrep -f 'cloudflared tunnel' >/dev/null 2>&1
-}
-
 launchagent_running() {
   local label="$1"
   local out
@@ -265,7 +259,6 @@ launchagent_running() {
     return 0
   fi
   [[ "$label" == "com.cursor.agent.worker" ]] && cursor_worker_process_running && return 0
-  [[ "$label" == "com.cloudflared.tunnel" ]] && cloudflared_process_running && return 0
   return 1
 }
 
@@ -274,212 +267,10 @@ cursor_agent_state_file_present() {
 }
 
 # --- scripts/lib/status_report.sh.sh ---
-# 설치·실행·Git·Tunnel 요약 (한눈에 보기)
-
-parse_cf_config_summary() {
-  local cfg="$HOME/.cloudflared/config.yml"
-  [[ -f "$cfg" ]] || return 1
-  local tunnel_line host_line svc_line
-  tunnel_line=$(grep -E '^tunnel:' "$cfg" | head -1 | sed 's/^tunnel:[[:space:]]*//')
-  host_line=$(grep -E 'hostname:' "$cfg" | head -1 | sed 's/.*hostname:[[:space:]]*//')
-  svc_line=$(grep -E 'service: http' "$cfg" | head -1 | sed 's/.*service:[[:space:]]*//')
-  printf '%s\t%s\t%s\n' "${tunnel_line:-?}" "${host_line:-?}" "${svc_line:-?}"
-}
-
-cloudflare_has_tunnel_credentials() {
-  local f
-  shopt -s nullglob
-  for f in "$HOME/.cloudflared"/*.json; do
-    [[ -f "$f" ]] || continue
-    case "$f" in
-      *cert*) continue ;;
-    esac
-    return 0
-  done
-  shopt -u nullglob
-  return 1
-}
-
-cloudflared_tunnel_list_ok() {
-  command_exists cloudflared || return 1
-  cloudflared tunnel list 2>/dev/null | grep -qE '[0-9a-fA-F]{8}-[0-9a-fA-F]{4}'
-}
-
-# config.yml 에 터널·호스트가 있으면 구성된 것으로 봄 (cert 없어도 token JSON 등으로 동작 가능)
-cloudflare_looks_connected() {
-  local cf_line tid host svc
-  cf_line=$(parse_cf_config_summary 2>/dev/null) || return 1
-  IFS=$'\t' read -r tid host svc <<<"$cf_line"
-  [[ -n "$host" && "$host" != "?" ]] || [[ -n "$tid" && "$tid" != "?" ]] || return 1
-  cloudflared_cert_ok && return 0
-  cloudflare_has_tunnel_credentials && return 0
-  cloudflared_tunnel_list_ok && return 0
-  return 1
-}
-
-cloudflare_tunnel_running() {
-  launchagent_running "com.cloudflared.tunnel" && return 0
-  cloudflared_process_running && return 0
-  return 1
-}
+# 설치·실행·Git 요약 (한눈에 보기)
 
 github_cli_logged_in() {
   command_exists gh && gh auth status -h github.com >/dev/null 2>&1
-}
-
-# config.yml 의 ingress hostname → service (터널 라우트 요약)
-cloudflare_config_ingress_pairs() {
-  local cfg="$HOME/.cloudflared/config.yml"
-  [[ -f "$cfg" ]] || return 0
-  command_exists python3 || return 0
-  CF_CFG="$cfg" python3 <<'PY'
-import os, re, pathlib
-
-def strip_inline_comment(s: str) -> str:
-    in_single = False
-    in_double = False
-    out = []
-    for ch in s:
-        if ch == "'" and not in_double:
-            in_single = not in_single
-            out.append(ch)
-            continue
-        if ch == '"' and not in_single:
-            in_double = not in_double
-            out.append(ch)
-            continue
-        if ch == "#" and not in_single and not in_double:
-            break
-        out.append(ch)
-    return "".join(out).strip()
-
-def clean_scalar(v: str) -> str:
-    v = strip_inline_comment(v).strip()
-    if len(v) >= 2 and ((v[0] == v[-1] == '"') or (v[0] == v[-1] == "'")):
-        v = v[1:-1].strip()
-    return v
-
-def add_kv(rule: dict, key: str, value: str) -> None:
-    key = (key or "").strip().lower()
-    if not key:
-        return
-    rule[key] = clean_scalar(value)
-
-p = pathlib.Path(os.environ["CF_CFG"])
-t = p.read_text(encoding="utf-8", errors="replace")
-lines = t.splitlines()
-in_ingress = False
-rules = []
-cur = None
-
-for raw in lines:
-    line = raw.rstrip()
-    stripped = line.strip()
-    if not in_ingress:
-        if re.match(r"^ingress\s*:\s*$", stripped):
-            in_ingress = True
-        continue
-    if not stripped:
-        continue
-    # ingress 섹션이 끝나면 중단 (다음 top-level key)
-    if not line.startswith((" ", "\t", "-")) and re.match(r"^[A-Za-z0-9_-]+\s*:", stripped):
-        break
-    m_item = re.match(r"^\s*-\s*(.*)$", line)
-    if m_item:
-        if cur:
-            rules.append(cur)
-        cur = {}
-        rest = m_item.group(1).strip()
-        if rest:
-            m_kv = re.match(r"^([A-Za-z0-9_-]+)\s*:\s*(.*)$", rest)
-            if m_kv:
-                add_kv(cur, m_kv.group(1), m_kv.group(2))
-        continue
-    if cur is None:
-        continue
-    m_kv = re.match(r"^\s+([A-Za-z0-9_-]+)\s*:\s*(.*)$", line)
-    if m_kv:
-        add_kv(cur, m_kv.group(1), m_kv.group(2))
-
-if cur:
-    rules.append(cur)
-
-for r in rules:
-    host = (r.get("hostname") or r.get("host") or "").strip()
-    svc = (r.get("service") or "").strip()
-    if not host or not svc:
-        continue
-    if "http_status" in svc:
-        continue
-    print(f"{host}\t{svc}")
-PY
-}
-
-# ingress 의 service URL 에서 로컬 포트 추출 (sed 금지: 127.0.0.1 → 잘못된 "1" 방지)
-cloudflare_service_local_port() {
-  local svc="${1:-}"
-  [[ -n "$svc" ]] || return 1
-  local out
-  out="$(
-    CF_INGRESS_SVC="$svc" python3 <<'PY'
-import os, urllib.parse
-
-s = (os.environ.get("CF_INGRESS_SVC") or "").strip()
-if not s or "://" not in s:
-    raise SystemExit(1)
-u = urllib.parse.urlparse(s)
-port = u.port
-if port is None:
-    if u.scheme in ("http", "ws"):
-        port = 80
-    elif u.scheme in ("https", "wss"):
-        port = 443
-    else:
-        raise SystemExit(1)
-print(port, end="")
-PY
-  )" || return 1
-  [[ -n "$out" ]] || return 1
-  printf '%s' "$out"
-}
-
-# config ingress 에 나온 로컬 포트들 (중복 제거, 쉼표 구분) — 안내용
-cloudflare_config_ingress_local_ports_unique_csv() {
-  local ports="" lp
-  while IFS=$'\t' read -r _h s || [[ -n "$_h" ]]; do
-    [[ -z "$_h" ]] && continue
-    lp="$(cloudflare_service_local_port "$s" 2>/dev/null)" || continue
-    [[ "$lp" =~ ^[0-9]+$ ]] || continue
-    case ",$ports," in
-      *",$lp,"*) ;;
-      *) ports="${ports:+$ports,}$lp" ;;
-    esac
-  done < <(cloudflare_config_ingress_pairs)
-  printf '%s' "$ports"
-}
-
-# stdout: 해당 포트로 연결된 hostname 한 줄씩 (중복 제거)
-cloudflare_hostnames_for_port() {
-  local want="${1:-}"
-  want="${want// /}"
-  [[ "$want" =~ ^[0-9]+$ ]] || return 0
-  local h s lp seen=""
-  while IFS=$'\t' read -r h s || [[ -n "$h" ]]; do
-    [[ -z "$h" ]] && continue
-    lp="$(cloudflare_service_local_port "$s" 2>/dev/null)" || continue
-    [[ "$lp" == "$want" ]] || continue
-    case "$seen" in
-      *" ${h} "*) continue ;;
-    esac
-    printf '%s\n' "$h"
-    seen="${seen} ${h} "
-  done < <(cloudflare_config_ingress_pairs)
-}
-
-# cloudflared CLI 에 등록된 터널 (이름·ID 일부)
-cloudflared_tunnel_list_rows() {
-  command_exists cloudflared || return 0
-  cloudflared tunnel list 2>/dev/null | tail -n +2 | head -20
 }
 
 # 맥에서 LISTEN 중인 TCP 포트 번호 나열 (참고용)
@@ -566,19 +357,7 @@ status_dashboard_compact_for_dialog() {
   [[ -z "$w" ]] && w="$(cursor_setup_default_workspace_dir)"
   w=$(expand_tilde "$w")
 
-  local cf_ko gh_ko ag_ko wk_ko
-  if cloudflare_looks_connected; then
-    local _h _s cf_line
-    cf_line=$(parse_cf_config_summary 2>/dev/null) || true
-    IFS=$'\t' read -r _ _h _s <<<"$cf_line"
-    if cloudflare_tunnel_running; then
-      cf_ko="연결됨 · $_h · 터널 실행 중"
-    else
-      cf_ko="설정됨 · $_h · 터널 미실행"
-    fi
-  else
-    cf_ko="연결 안 됨"
-  fi
+  local gh_ko ag_ko wk_ko
 
   if github_cli_logged_in; then
     gh_ko="로그인됨 ($(gh api user -q .login 2>/dev/null || echo 계정))"
@@ -611,7 +390,6 @@ status_dashboard_compact_for_dialog() {
 
   printf '%s\n' "지금 맥 상태 요약입니다."
   printf '%s\n' ""
-  printf '%s\n' "· Cloudflare: $cf_ko"
   printf '%s\n' "· GitHub: $gh_ko"
   printf '%s\n' "· Cursor: $ag_ko · $wk_ko"
   printf '%s\n' "· 작업 폴더: $w"
@@ -649,7 +427,6 @@ status_dashboard_print() {
   printf '  %-22s %s\n' "git" "$(command_exists git && echo "있음" || echo "없음")"
   printf '  %-22s %s\n' "Homebrew" "$(command_exists brew && echo "있음" || echo "없음")"
   printf '  %-22s %s\n' "GitHub CLI (gh)" "$(command_exists gh && echo "있음" || echo "없음")"
-  printf '  %-22s %s\n' "cloudflared" "$(command_exists cloudflared && echo "있음" || echo "없음")"
   printf '  %-22s %s\n' "Cursor agent" "$([[ -x "$HOME/.local/bin/agent" ]] && echo "있음" || echo "없음")"
 
   printf '\n%s\n' "■ GitHub"
@@ -700,34 +477,6 @@ status_dashboard_print() {
     printf '  %-22s %s\n' "CLI 상태 파일" "있음 (로그인·사용 이력 가능)"
   else
     printf '  %-22s %s\n' "CLI 상태 파일" "없음"
-  fi
-
-  printf '\n%s\n' "■ Cloudflare Tunnel"
-  if cloudflared_cert_ok; then
-    printf '  %-22s %s\n' "로그인(cert)" "있음"
-  else
-    printf '  %-22s %s\n' "로그인(cert)" "없음/미확인"
-  fi
-  local cf_line
-  if cf_line=$(parse_cf_config_summary 2>/dev/null); then
-    local tid host svc
-    IFS=$'\t' read -r tid host svc <<<"$cf_line"
-    printf '  %-22s %s\n' "config.yml" "있음 (~/.cloudflared/)"
-    printf '  %-22s %s\n' "터널 ID" "$tid"
-    printf '  %-22s %s\n' "공개 도메인" "$host"
-    printf '  %-22s %s\n' "로컬로 보내는 주소" "$svc"
-  else
-    printf '  %-22s %s\n' "config.yml" "없음 또는 읽기 실패"
-  fi
-  local p_cf="$HOME/Library/LaunchAgents/com.cloudflared.tunnel.plist"
-  if [[ -f "$p_cf" ]]; then
-    if launchagent_running "com.cloudflared.tunnel"; then
-      printf '  %-22s %s\n' "터널 LaunchAgent" "동작 중"
-    else
-      printf '  %-22s %s\n' "터널 LaunchAgent" "등록됨, 멈춤/미기동"
-    fi
-  else
-    printf '  %-22s %s\n' "터널 LaunchAgent" "미등록"
   fi
 
   printf '\n%s\n' "■ Cursor 웹에서 직접 (자동 불가)"
@@ -1460,30 +1209,6 @@ _dashboard_card() {
 }
 
 dashboard_global_cards_html() {
-  local cf_dot cf_title cf_body cf_extra cf_line tid host svc
-  cf_title="$(_d "Cloudflare Tunnel" "Cloudflare Tunnel")"
-  if cloudflare_looks_connected; then
-    cf_dot="ok"
-    if cf_line=$(parse_cf_config_summary 2>/dev/null); then
-      IFS=$'\t' read -r tid host svc <<<"$cf_line"
-      cf_body="$(_d "구성됨" "Configured")"
-      cf_extra="$(_d "도메인" "Domain") ${host:-?} → ${svc:-?}"
-    else
-      cf_body="$(_d "연결로 판단됨" "Connected (inferred)")"
-      cf_extra="$(_d "config.yml 확인" "Check config.yml")"
-    fi
-    if cloudflare_tunnel_running; then
-      cf_body="${cf_body} · $(_d "터널 동작 중" "tunnel running")"
-    else
-      cf_body="${cf_body} · $(_d "터널 프로세스 없음" "no tunnel process")"
-    fi
-  else
-    cf_dot="bad"
-    cf_body="$(_d "연결·설정 없음" "Not connected")"
-    cf_extra="~/.cloudflared/config.yml · cert · credentials.json"
-  fi
-  _dashboard_card "$cf_dot" "$cf_title" "$cf_body" "$cf_extra"
-
   if github_cli_logged_in; then
     _dashboard_card "ok" "GitHub" "$(_d "로그인됨" "Signed in") ($(gh api user -q .login 2>/dev/null || echo "$(_d "계정" "account")"))" ""
   else
@@ -1516,18 +1241,6 @@ dashboard_global_cards_html() {
     _dashboard_card "warn" "$(_d "Cursor 워커" "Cursor workers")" "$(_d "프로세스만 실행 중" "Process only")" "$(_d "LaunchAgent 없음" "No LaunchAgent")"
   else
     _dashboard_card "bad" "$(_d "Cursor 워커" "Cursor workers")" "$(_d "미등록" "Not registered")" "$(_d "프로젝트 카드에서 셋업" "Set up from a project card")"
-  fi
-
-  if [[ -f "$HOME/Library/LaunchAgents/com.cloudflared.tunnel.plist" ]]; then
-    if launchagent_running "com.cloudflared.tunnel"; then
-      _dashboard_card "ok" "$(_d "cloudflared 서비스" "cloudflared service")" "$(_d "Tunnel LaunchAgent 동작" "Tunnel LaunchAgent running")" ""
-    else
-      _dashboard_card "warn" "$(_d "cloudflared 서비스" "cloudflared service")" "$(_d "plist 등록 · 멈춤" "plist loaded · stopped")" ""
-    fi
-  elif cloudflared_process_running; then
-    _dashboard_card "ok" "cloudflared" "$(_d "터널 프로세스 실행 중" "Tunnel process running")" ""
-  else
-    _dashboard_card "warn" "cloudflared" "$(_d "백그라운드 터널 없음" "No background tunnel")" ""
   fi
 }
 
@@ -1595,17 +1308,9 @@ workspace_gap_hint_for_path() {
   fi
 }
 
-dashboard_global_actions_html() {
-  printf '    <div class="section-title section-muted">%s</div>\n' "$(_d "고급" "More")"
-  printf '    <div class="action-row">\n'
-  printf '      <form method="post" action="/tunnel"><button type="submit" class="btn btn-secondary">Tunnel</button></form>\n'
-  printf '    </div>\n'
-}
-
 # 접힌 요약 줄: 항목마다 동그라미+라벨 (CURSOR_DASH_LANG 한 벌만)
 dashboard_quick_check_summary_html() {
-  local d_cf d_gh d_ag d_wk lb_cf lb_gh lb_ag lb_wk
-  if cloudflare_looks_connected; then d_cf=ok; else d_cf=bad; fi
+  local d_gh d_ag d_wk lb_gh lb_ag lb_wk
   if github_cli_logged_in; then d_gh=ok; else d_gh=bad; fi
   if [[ -x "$HOME/.local/bin/agent" ]]; then
     if cursor_agent_state_file_present; then d_ag=ok; else d_ag=warn; fi
@@ -1622,13 +1327,11 @@ dashboard_quick_check_summary_html() {
   else
     d_wk=bad
   fi
-  lb_cf="$(_d "터널" "Tunnel")"
   lb_gh="GitHub"
   lb_ag="$(_d "Agent CLI" "Agent CLI")"
   lb_wk="$(_d "워커" "Worker")"
   printf '      <span class="qc-title">%s</span>\n' "$(_d "빠른 점검" "Quick check")"
   printf '      <span class="qc-pairs" role="list">\n'
-  printf '        <span class="qc-pair" role="listitem"><span class="dot %s"></span><span class="qc-lbl">%s</span></span>\n' "$d_cf" "$(html_escape "$lb_cf")"
   printf '        <span class="qc-pair" role="listitem"><span class="dot %s"></span><span class="qc-lbl">%s</span></span>\n' "$d_gh" "$(html_escape "$lb_gh")"
   printf '        <span class="qc-pair" role="listitem"><span class="dot %s"></span><span class="qc-lbl">%s</span></span>\n' "$d_ag" "$(html_escape "$lb_ag")"
   printf '        <span class="qc-pair" role="listitem"><span class="dot %s"></span><span class="qc-lbl">%s</span></span>\n' "$d_wk" "$(html_escape "$lb_wk")"
@@ -1672,12 +1375,11 @@ _dashboard_sidebar_locale_body_html() {
   printf '          <summary>%s</summary>\n' "$(_d "고급: 파일로 편집" "Advanced: edit config files")"
   printf '        <form method="post" action="/action/open-user-workspaces" class="choice-form"><button type="submit" class="btn-choice"><span class="btn-choice-main"><span>%s</span><span class="btn-choice-sub">%s</span></span><span class="chev">›</span></button></form>\n' "$(_d "폴더 목록 편집" "Edit folder list")" ""
   printf '        <form method="post" action="/action/open-user-services-jsonl" class="choice-form"><button type="submit" class="btn-choice"><span class="btn-choice-main"><span>%s</span><span class="btn-choice-sub">workspace-services.jsonl</span></span><span class="chev">›</span></button></form>\n' "$(_d "실행·포트" "Run / port")"
-  printf '        <form method="post" action="/action/open-cloudflared-config" class="choice-form"><button type="submit" class="btn-choice"><span class="btn-choice-main"><span>%s</span><span class="btn-choice-sub">~/.cloudflared/config.yml</span></span><span class="chev">›</span></button></form>\n' "$(_d "Tunnel 설정" "Tunnel config")"
   printf '        </details>\n'
   printf '      </div>\n'
   _sn=$((_sn + 1))
   printf '      <div class="step-card">\n'
-  printf '        <div class="step-label"><span class="step-num">%s</span>%s</div>\n' "$_sn" "$(_d "터널·GitHub·Agent" "Tunnel, GitHub, Agent")"
+  printf '        <div class="step-label"><span class="step-num">%s</span>%s</div>\n' "$_sn" "$(_d "GitHub·Agent" "GitHub & Agent")"
   printf '        <p class="step-desc">%s</p>\n' "$(_d "설치 마법사를 실행합니다. 이미 끝냈으면 건너뛰어도 됩니다." "Run the setup wizard. Skip if you already finished.")"
   printf '        <form method="post" action="/launch-setup" class="choice-form"><button type="submit" class="btn-choice"><span class="btn-choice-main"><span>%s</span><span class="btn-choice-sub mono">%s</span></span><span class="chev">›</span></button></form>\n' "$(_d "셋업 스크립트 실행" "Run setup script")" "$(html_escape "$_setup_bn")"
   printf '      </div>\n'
@@ -1698,48 +1400,7 @@ _dashboard_sidebar_locale_body_html() {
 
 # 로컬 서버 대시보드: 카드마다 눌러서 터미널에서 이어가기
 dashboard_global_cards_html_interactive() {
-  local cf_line tid host svc cf_body gh_user agent_bin cf_dot h s ingress_data
-  if cloudflare_looks_connected; then cf_dot="ok"; else cf_dot="bad"; fi
-  printf '      <div class="card card-setup">\n'
-  printf '        <div class="card-h"><span class="dot %s"></span>%s</div>\n' "$cf_dot" "$(_d "Cloudflare" "Cloudflare")"
-  printf '        <p class="cf-hint-line">%s</p>\n' "$(_d "도메인·포트는 <strong>프로젝트</strong> 카드에서" "Match domain ↔ port in each <strong>project</strong> card")"
-  if cloudflare_looks_connected; then
-    if cloudflare_tunnel_running; then
-      cf_body="$(_d "터널 동작 중" "Tunnel running")"
-    else
-      cf_body="$(_d "설정됨 · 터널 대기" "Ready · tunnel idle")"
-    fi
-    printf '        <p class="card-lead ok">%s</p>\n' "$(html_escape "$cf_body")"
-    ingress_data=$(cloudflare_config_ingress_pairs)
-    printf '        <ul class="cf-routes mono">\n'
-    if [[ -z "$ingress_data" ]]; then
-      if cf_line=$(parse_cf_config_summary 2>/dev/null); then
-        IFS=$'\t' read -r tid host svc <<<"$cf_line"
-        if [[ -n "$host" && "$host" != "?" ]]; then
-          printf '            <li>%s → %s</li>\n' "$(html_escape "$host")" "$(html_escape "${svc:-?}")"
-        else
-          printf '            <li>—</li>\n'
-        fi
-      else
-        printf '            <li>—</li>\n'
-      fi
-    else
-      while IFS=$'\t' read -r h s || [[ -n "$h" ]]; do
-        [[ -z "$h" ]] && continue
-        [[ "$h" == \[* ]] && continue
-        printf '            <li>%s → %s</li>\n' "$(html_escape "$h")" "$(html_escape "$s")"
-      done <<<"$ingress_data"
-    fi
-    printf '        </ul>\n'
-    printf '        <div class="card-actions">\n'
-    printf '          <form method="post" action="/tunnel"><button type="submit" class="btn btn-secondary btn-small btn-pill">%s</button></form>\n' "$(_d "Tunnel 마법사" "Tunnel setup")"
-    printf '        </div>\n'
-  else
-    printf '        <p class="card-lead bad">%s</p>\n' "$(_d "미설정" "Not set")"
-    printf '        <form method="post" action="/tunnel"><button type="submit" class="btn btn-pill">%s</button></form>\n' "$(_d "Tunnel 마법사" "Tunnel setup")"
-  fi
-  printf '      </div>\n'
-
+  local gh_user agent_bin
   printf '      <div class="card card-setup">\n'
   if github_cli_logged_in; then
     gh_user="$(gh api user -q .login 2>/dev/null || true)"
@@ -2081,46 +1742,6 @@ print('svc_exec_path=' + shlex.quote(d.get('exec') or ''))
     printf '          </div>\n'
     printf '        </details>\n'
     printf '      </div>\n'
-    printf '      <div class="ws-tunnel">\n'
-    printf '        <div class="ws-svc-head"><span class="ws-svc-title">%s</span><span class="ws-svc-note">%s</span></div>\n' "$(_d "공개 주소" "Public URL")" "$(_d "Tunnel ↔ 포트" "Tunnel ↔ port")"
-    if [[ -z "$cf_show_ports" ]]; then
-      printf '        <p class="ws-tunnel-hint">%s</p>\n' "$(_d "포트가 있으면 config.yml 과 대조해 도메인을 표시합니다." "Set a port to see matching domains from config.yml.")"
-    else
-      _rest="$cf_show_ports,"
-      while [[ -n "$_rest" ]]; do
-        _tp="${_rest%%,*}"
-        _rest="${_rest#*,}"
-        _tp="${_tp// /}"
-        [[ "$_tp" =~ ^[0-9]+$ ]] || continue
-        _cf_hn_list=()
-        while IFS= read -r _hn || [[ -n "$_hn" ]]; do
-          [[ -z "$_hn" ]] && continue
-          _cf_hn_list+=("$_hn")
-        done < <(cloudflare_hostnames_for_port "$_tp")
-        _anyh=${#_cf_hn_list[@]}
-        if [[ "$_anyh" -gt 0 ]]; then
-          printf '        <div class="ws-tunnel-row ws-tunnel-row--matched"><span class="mono">%s %s</span> · ' "$(_d "포트" "Port")" "$(html_escape "$_tp")"
-          for _hn in "${_cf_hn_list[@]}"; do
-            printf '<a class="ws-tunnel-link" href="https://%s/" target="_blank" rel="noopener noreferrer">%s</a> ' "$(html_escape "$_hn")" "$(html_escape "$_hn")"
-          done
-          printf '<span class="ws-tunnel-ok">%s</span>' "$(_d "터널과 포트 일치" "Tunnel matches this port")"
-        else
-          printf '        <div class="ws-tunnel-row"><span class="mono">%s %s</span> · ' "$(_d "포트" "Port")" "$(html_escape "$_tp")"
-          printf '<span class="ws-tunnel-miss">%s</span>' "$(_d "연결된 도메인 없음" "No domain for this port")"
-          if cloudflare_looks_connected; then
-            _cf_ing_ports="$(cloudflare_config_ingress_local_ports_unique_csv)"
-            if [[ -n "$_cf_ing_ports" ]]; then
-              printf ' <span class="ws-tunnel-miss-hint">%s <span class="mono">%s</span></span>' "$(_d "config ingress 포트:" "config ingress ports:")" "$(html_escape "$_cf_ing_ports")"
-            fi
-          fi
-        fi
-        printf '</div>\n'
-      done
-    fi
-    printf '        <div class="ws-svc-actions" style="margin-top:8px">\n'
-    printf '          <form method="post" action="/tunnel-workspace"><input type="hidden" name="path" value="%s" /><button type="submit" class="btn btn-secondary btn-small btn-pill">%s</button></form>\n' "$(html_escape "$ws")" "$(_d "Tunnel 맞추기" "Match tunnel")"
-    printf '        </div>\n'
-    printf '      </div>\n'
     printf '      <details class="repo-more">\n'
     printf '        <summary class="repo-more-summary">%s</summary>\n' "$(_d "저장소 · 경로 · 워커" "Repo · path · worker")"
     printf '        <div class="repo-more-body">\n'
@@ -2195,8 +1816,10 @@ dashboard_emit_html_template() {
   .main { padding:22px 24px 40px; max-width:1040px; margin:0 auto; width:100%; }
   .section-title { font-size:11px; font-weight:600; color:var(--muted); text-transform:uppercase; margin:0 0 10px; letter-spacing:.06em; }
   .grid { display:grid; gap:14px; margin-bottom:24px; }
-  .grid-setup { grid-template-columns:repeat(2, minmax(0,1fr)); align-items:stretch; }
-  @media (max-width:640px){ .grid-setup { grid-template-columns:1fr; } }
+  /* 빠른 점검 카드 3개를 한 행에 균등 배치 (2열이면 3번째 행에 오른쪽 빈 칸이 생김) */
+  .grid-setup { grid-template-columns:repeat(3, minmax(0,1fr)); align-items:stretch; }
+  @media (max-width:768px){ .grid-setup { grid-template-columns:1fr; } }
+  .quick-check-grid > .card { min-height:100%; }
   .card { background:var(--surface); border:1px solid var(--border); border-radius:8px; padding:14px; }
   .card-setup { display:flex; flex-direction:column; align-items:flex-start; gap:8px; min-height:0; }
   .card-h { font-weight:600; font-size:13px; display:flex; align-items:center; gap:8px; margin-bottom:4px; }
@@ -2335,22 +1958,10 @@ dashboard_emit_html_template() {
   .ws-exec-pick-row { display:flex; flex-wrap:wrap; gap:8px; align-items:center; }
   .ws-exec-port-label { font-size:11px; color:var(--muted); display:inline-flex; align-items:center; gap:6px; margin-left:4px; }
   .ws-exec-port-input { width:92px; padding:6px 8px; border-radius:6px; border:1px solid var(--border); background:#0d1117; color:var(--text); font-size:12px; }
-  .cf-routes { margin:2px 0 0; padding-left:14px; font-size:11px; line-height:1.4; color:var(--text); max-height:72px; overflow-y:auto; }
-  .cf-routes li { margin:3px 0; word-break:break-word; }
-  .cf-hint-line { font-size:11px; color:var(--muted); margin:0; line-height:1.35; }
   .path-chip { display:inline-block; padding:3px 8px; border-radius:999px; background:#21262d; border:1px solid var(--border); font-size:11px; max-width:100%; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; vertical-align:middle; }
   .btn-pill { border-radius:999px !important; }
   .card-actions-chips { gap:6px !important; }
   .action-row-chips { gap:8px !important; }
-  .ws-tunnel { margin:10px 0 12px; padding:12px 14px; background:#0c1629; border:1px solid var(--border); border-radius:8px; }
-  .ws-tunnel-hint { font-size:11px; color:var(--muted); margin:0; line-height:1.45; }
-  .ws-tunnel-row { font-size:12px; margin:6px 0; line-height:1.45; display:flex; flex-wrap:wrap; align-items:center; gap:6px; }
-  .ws-tunnel-row--matched { border-left:3px solid var(--ok); padding-left:10px; margin-left:-2px; border-radius:2px; }
-  .ws-tunnel-miss { color:var(--warn); font-size:11px; }
-  .ws-tunnel-miss-hint { color:var(--muted); font-size:10px; }
-  .ws-tunnel-ok { color:var(--ok); font-size:11px; font-weight:600; }
-  .ws-tunnel-link { color:var(--accent); text-decoration:none; font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:11px; }
-  .ws-tunnel-link:hover { text-decoration:underline; }
   .side-dash-actions-wrap { display:flex; flex-direction:column; gap:6px; margin-top:4px; }
   .side-dash-actions-wrap form { margin:0; }
   .sidebar-steps { display:flex; flex-direction:column; gap:10px; margin-top:4px; }
@@ -2639,7 +2250,7 @@ _dashboard_stay_script_fragment() {
           return;
         }
         var reloadQuick = ['/action/gh-login', '/action/agent-login', '/action/worker-kickstart'];
-        var reloadSlow = ['/action/agent-install', '/tunnel', '/tunnel-workspace', '/rename-repo', '/workspace-add-folder'];
+        var reloadSlow = ['/action/agent-install', '/rename-repo', '/workspace-add-folder'];
         if (reloadQuick.indexOf(act) !== -1) {
           if (bar) bar.textContent = L.reloadSoon;
           setTimeout(function () { window.location.reload(); }, 2200);
@@ -3398,7 +3009,7 @@ _dashboard_server_write_py() {
   python3 <<'PY' > "$out"
 import textwrap, sys
 code = r'''
-import os, re, secrets, subprocess, sys, threading, time, urllib.parse, json, pathlib
+import os, re, secrets, shutil, subprocess, sys, threading, time, urllib.parse, json, pathlib
 from http.server import HTTPServer, BaseHTTPRequestHandler
 import shlex
 
@@ -3922,7 +3533,7 @@ class H(BaseHTTPRequestHandler):
             # 브라우저가 응답 도중 연결을 끊는 경우(새로고침/탭 닫기)는 정상 동작으로 본다.
             return
 
-    def _run_term(self, script_body, auto_close=False):
+    def _run_term(self, script_body, auto_close=False, activate_terminal=True):
         if auto_close:
             script_body = script_body + "; exit"
         wrapped = "bash -lc " + shlex.quote(script_body)
@@ -3931,10 +3542,11 @@ class H(BaseHTTPRequestHandler):
             return '"' + s.replace("\\", "\\\\").replace('"', '\\"') + '"'
 
         # 앞으로 가져오기 — 대시보드 버튼 후 터미널이 뒤에만 뜨는 문제 완화
-        subprocess.run(
-            ["osascript", "-e", 'tell application "Terminal" to activate'],
-            check=False,
-        )
+        if activate_terminal:
+            subprocess.run(
+                ["osascript", "-e", 'tell application "Terminal" to activate'],
+                check=False,
+            )
         scpt = "tell application \"Terminal\" to do script " + aq(wrapped)
         subprocess.run(["osascript", "-e", scpt], check=False)
 
@@ -4154,43 +3766,6 @@ class H(BaseHTTPRequestHandler):
             return
         if p == "/full-wizard":
             inner = "cd {} && /bin/bash {} --full-wizard".format(shlex.quote(root), shlex.quote(setup))
-            self._run_term(inner, auto_close=False)
-            self.send_response(200)
-            self.send_header("Content-Type", "text/html; charset=utf-8")
-            self.end_headers()
-            self.wfile.write(self._html_ok())
-            return
-        if p == "/tunnel":
-            inner = "cd {} && /bin/bash {} --tunnel-only".format(shlex.quote(root), shlex.quote(setup))
-            self._run_term(inner, auto_close=False)
-            self.send_response(200)
-            self.send_header("Content-Type", "text/html; charset=utf-8")
-            self.end_headers()
-            self.wfile.write(self._html_ok())
-            return
-        if p == "/tunnel-workspace":
-            allow_path = os.environ.get("CURSOR_DASH_ALLOWLIST", "")
-            if allow_path:
-                subprocess.run(
-                    [setup, "--_cursor-setup-write-allowlist", allow_path],
-                    check=False,
-                )
-            length = int(self.headers.get("Content-Length", "0"))
-            body = self.rfile.read(length).decode("utf-8", errors="replace")
-            q = urllib.parse.parse_qs(body)
-            raw = (q.get("path") or [""])[0].strip()
-            if not self._allow_ok(raw):
-                self.send_response(403)
-                self.send_header("Content-Type", "text/html; charset=utf-8")
-                self.end_headers()
-                self.wfile.write(self._html_denied())
-                return
-            rp = os.path.realpath(raw)
-            inner = "export CURSOR_SETUP_TUNNEL_WORKSPACE={}; export CURSOR_SETUP_CF_FORCE=1; cd {} && /bin/bash {} --tunnel-only".format(
-                shlex.quote(rp),
-                shlex.quote(root),
-                shlex.quote(setup),
-            )
             self._run_term(inner, auto_close=False)
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
@@ -4659,20 +4234,6 @@ class H(BaseHTTPRequestHandler):
                 self.end_headers()
                 self.wfile.write(self._html_ok())
                 return
-            if p == "/action/open-cloudflared-config":
-                cf = pathlib.Path.home() / ".cloudflared" / "config.yml"
-                try:
-                    cf.parent.mkdir(parents=True, exist_ok=True)
-                    cf.touch(exist_ok=True)
-                except OSError:
-                    pass
-                inner = "open -e " + shlex.quote(str(cf))
-                self._run_term(inner, auto_close=True)
-                self.send_response(200)
-                self.send_header("Content-Type", "text/html; charset=utf-8")
-                self.end_headers()
-                self.wfile.write(self._html_ok())
-                return
             act = {
                 "/action/gh-login": (
                     "echo ''; echo 'GitHub: 브라우저에서 로그인을 마치면 이 탭이 닫히고 대시보드를 새로고침하세요.'; "
@@ -4933,10 +4494,10 @@ gui_finish_celebrate() {
 }
 
 # --- scripts/lib/preflight.sh.sh ---
-# Preflight: macOS, git, Homebrew, 선택적 gh / cloudflared
+# Preflight: macOS, git, Homebrew, gh
 
 preflight_main() {
-  log_info "[1/5] 준비"
+  log_info "[1/4] 준비"
 
   if ! command_exists git; then
     log_err "git 없음 → 터미널에 입력: xcode-select --install"
@@ -4944,7 +4505,7 @@ preflight_main() {
   fi
 
   if ! command_exists brew; then
-    log_warn "Homebrew 없음 (gh, cloudflared 설치에 필요)"
+    log_warn "Homebrew 없음 (gh 설치에 필요)"
     if prompt_yn "brew.sh 안내 페이지를 열까요?" "y"; then
       run_cmd open "https://brew.sh"
     fi
@@ -4957,30 +4518,6 @@ preflight_main() {
     run_cmd brew install gh
   else
     log_info "gh: 이미 설치됨"
-  fi
-
-  local want_cf=0
-  if [[ "${CURSOR_SETUP_DASHBOARD_CF_LOCKED:-0}" == "1" ]]; then
-    [[ "${CURSOR_SETUP_WITH_CF:-}" == "1" ]] && want_cf=1 || want_cf=0
-  elif [[ "$CURSOR_SETUP_WITH_CF" == "1" ]]; then
-    want_cf=1
-  elif [[ "$CURSOR_SETUP_WITH_CF" == "0" ]]; then
-    want_cf=0
-  else
-    if cloudflared_cert_ok && [[ -f "$HOME/.cloudflared/config.yml" ]]; then
-      log_info "Cloudflare: 설정 있음 → Tunnel 단계 생략"
-      want_cf=0
-    elif prompt_yn "Cloudflare Tunnel(도메인)도 할까요?" "n"; then
-      want_cf=1
-    fi
-  fi
-  export CURSOR_SETUP_WITH_CF="$want_cf"
-
-  if [[ "$want_cf" == "1" ]] && ! command_exists cloudflared; then
-    log_info "cloudflared 설치 중…"
-    run_cmd brew install cloudflared
-  elif [[ "$want_cf" == "1" ]]; then
-    log_info "cloudflared: 이미 설치됨"
   fi
 }
 
@@ -5060,7 +4597,7 @@ github_repo_name_from_remote_url() {
 }
 
 github_main() {
-  log_info "[2/5] Git · GitHub"
+  log_info "[2/4] Git · GitHub"
 
   local default_work="${CURSOR_SETUP_DEFAULT_WORKSPACE:-}"
   [[ -z "$default_work" ]] && default_work="${CURSOR_SETUP_ROOT:-$HOME}"
@@ -5322,7 +4859,7 @@ cursor_agent_main() {
     exit 1
   fi
 
-  log_info "[3/5] Cursor Agent"
+  log_info "[3/4] Cursor Agent"
 
   local path_line='export PATH="$HOME/.local/bin:$PATH"'
   append_line_once "$HOME/.zshrc" "$path_line"
@@ -5381,279 +4918,6 @@ cursor_agent_main() {
   fi
 }
 
-# --- scripts/lib/cloudflare_tunnel.sh.sh ---
-# Cloudflare Tunnel (선택)
-
-# 번들(.command)에서는 앞선 청크에 정의됨. 저장소에서 --tunnel-only 만 쓸 때만 소스.
-cloudflare_tunnel_ensure_workspace_helpers() {
-  declare -F workspace_service_config_line >/dev/null 2>&1 && return 0
-  local r="${CURSOR_SETUP_ROOT:-}"
-  if [[ -z "$r" && -n "${BASH_SOURCE[0]:-}" ]]; then
-    r="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd 2>/dev/null)" || r=""
-  fi
-  [[ -n "$r" && -f "$r/scripts/lib/workspace_services.sh" ]] || return 0
-  # shellcheck disable=SC1091
-  source "$r/scripts/lib/workspace_services.sh"
-}
-
-cloudflare_tunnel_port_from_workspace_json() {
-  local wd="${1:-}"
-  [[ -n "$wd" ]] || return 1
-  cloudflare_tunnel_ensure_workspace_helpers
-  declare -F workspace_service_config_line >/dev/null 2>&1 || return 1
-  local js
-  js="$(workspace_service_config_line "$wd")"
-  printf '%s\n' "$js" | python3 -c "import sys,json; d=json.load(sys.stdin); p=(d.get('port') or '').strip(); print(p, end='')"
-}
-
-# workspace-services → 기존 config.yml 첫 ingress → 8080
-cloudflare_tunnel_default_local_port() {
-  local wd="${1:-}"
-  local from_ws from_cfg cf_line tid host svc
-  from_ws="$(cloudflare_tunnel_port_from_workspace_json "$wd" 2>/dev/null || true)"
-  [[ -n "$from_ws" ]] && {
-    printf '%s\n' "$from_ws"
-    return 0
-  }
-  if cf_line=$(parse_cf_config_summary 2>/dev/null); then
-    IFS=$'\t' read -r tid host svc <<<"$cf_line"
-    from_cfg="$(printf '%s' "$svc" | sed -nE 's|^[a-zA-Z]+://[^/:]+:([0-9]+).*|\1|p')"
-  fi
-  [[ -n "$from_cfg" ]] && {
-    printf '%s\n' "$from_cfg"
-    return 0
-  }
-  printf '%s\n' "8080"
-}
-
-cloudflare_tunnel_default_public_hostname() {
-  local cf_line tid host svc
-  cf_line=$(parse_cf_config_summary 2>/dev/null) || return 1
-  IFS=$'\t' read -r tid host svc <<<"$cf_line"
-  [[ -n "$host" && "$host" != "?" ]] && printf '%s\n' "$host"
-}
-
-cloudflare_tunnel_print_current_situation() {
-  local wd="${1:-}"
-  log_info "──────── Cloudflare Tunnel · 여기서는 앞단만: 공개 주소 → 맥의 로컬 포트 ────────"
-  log_info "【지금 맥에 저장된 설정】 ~/.cloudflared/config.yml"
-  if [[ -f "$HOME/.cloudflared/config.yml" ]]; then
-    local any=0 h s
-    while IFS=$'\t' read -r h s || [[ -n "$h" ]]; do
-      [[ -z "$h" ]] && continue
-      any=1
-      log_info "  · 인터넷 주소  $h  →  맥  $s"
-    done < <(cloudflare_config_ingress_pairs)
-    if [[ "$any" == "0" ]]; then
-      local cf_line tid host svc
-      if cf_line=$(parse_cf_config_summary 2>/dev/null); then
-        IFS=$'\t' read -r tid host svc <<<"$cf_line"
-        log_info "  · 터널 ID: ${tid:-?}"
-        log_info "  · 첫 라우트: ${host:-?} → ${svc:-?}"
-      else
-        log_info "  (파일은 있으나 ingress 를 파싱하지 못함)"
-      fi
-    fi
-  else
-    log_info "  없음 — 아직 config.yml 이 없습니다"
-  fi
-
-  log_info "【포트 기본값 출처】 workspace-services.jsonl (이 작업 폴더) → 없으면 위 config 의 로컬 포트 → 8080"
-  cloudflare_tunnel_ensure_workspace_helpers
-  local ph=""
-  if declare -F workspace_service_config_line >/dev/null 2>&1; then
-    ph="$(cloudflare_tunnel_port_from_workspace_json "$wd" 2>/dev/null || true)"
-  fi
-  if [[ -n "$ph" ]]; then
-    log_info "  이 폴더에 등록된 포트: $ph (아래 질문의 기본값으로 넣습니다)"
-  else
-    log_info "  이 폴더에 등록된 포트 없음 — 아래에서 숫자로 지정"
-  fi
-}
-
-cloudflare_tunnel_main() {
-  local work_dir="${1:-}"
-
-  if [[ "${CURSOR_SETUP_WITH_CF:-0}" != "1" ]]; then
-    return 0
-  fi
-
-  log_info "[4/5] Cloudflare Tunnel"
-
-  if ! command_exists cloudflared; then
-    log_warn "cloudflared 없음 — brew install cloudflared 후 다시 실행"
-    return 0
-  fi
-
-  if is_dry_run; then
-    log_info "[dry-run] cloudflared …"
-    return 0
-  fi
-
-  cloudflare_tunnel_print_current_situation "$work_dir"
-
-  if [[ "${CURSOR_SETUP_CF_FORCE:-0}" != "1" ]] && cloudflared_cert_ok && [[ -f "$HOME/.cloudflared/config.yml" ]]; then
-    log_info "위 설정을 그대로 둡니다 → Tunnel 단계 생략"
-    log_info "다시 짜려면: CURSOR_SETUP_CF_FORCE=1 ./setup … 또는 --with-cloudflare 전에 FORCE=1"
-    return 0
-  fi
-
-  log_info "【이번에 새로 적용할 내용】 Cloudflare 계정 로그인 후, 터널을 만들고 ‘바깥 주소 → 맥 포트’ 한 줄을 씁니다."
-  log_warn "Tunnel ingress 의 service 는 항상 http://127.0.0.1:<포트> 만 씁니다. 공인 IP(예: 218.x)나 Zero Trust「Published application」에 공인 IP:포트를 넣는 방식은 이 흐름과 다르며, 맥 방화벽·공유기 없이는 외부에서 안 열립니다."
-  log_warn "~/.cloudflared/*.json 과 config.yml 은 GitHub 에 올리지 마세요. (레포의 ./scripts/git-safe-verify.sh 로 추적 여부를 검사할 수 있습니다.)"
-
-  if cloudflared_cert_ok; then
-    log_info "Cloudflare: cert 있음 → login 생략"
-  else
-    if prompt_yn "Cloudflare 로그인(브라우저) 할까요?" "y"; then
-      cloudflared tunnel login || {
-        log_err "tunnel login 실패"
-        return 1
-      }
-    else
-      log_warn "login 없으면 터널을 못 만듦"
-      return 0
-    fi
-  fi
-
-  local tunnel_name
-  tunnel_name="$(prompt_with_default "Cloudflare 터널 이름 (계정·목록에 보이는 이름)" "autocrf-mini")"
-
-  local create_out
-  create_out="$(cloudflared tunnel create "$tunnel_name" 2>&1)" || true
-  printf '%s\n' "$create_out"
-
-  local tunnel_id
-  tunnel_id="$(printf '%s\n' "$create_out" | sed -nE 's/.*id ([0-9a-fA-F-]{36}).*/\1/p' | head -1)"
-  if [[ -z "$tunnel_id" ]]; then
-    tunnel_id="$(cloudflared tunnel list 2>/dev/null | awk -v n="$tunnel_name" 'NF>=2 && $2==n && $1 ~ /^[0-9a-fA-F-]{36}$/ {print $1; exit}')"
-  fi
-  if [[ -z "$tunnel_id" ]] && command_exists cloudflared; then
-    local info_out
-    info_out="$(cloudflared tunnel info "$tunnel_name" 2>/dev/null || true)"
-    tunnel_id="$(printf '%s\n' "$info_out" | sed -nE 's/.*([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}).*/\1/p' | head -1)"
-  fi
-  if [[ -z "$tunnel_id" ]]; then
-    log_err "터널 ID 확인 실패 — cloudflared tunnel list"
-    return 1
-  fi
-
-  local cred_file="$HOME/.cloudflared/${tunnel_id}.json"
-  if [[ ! -f "$cred_file" ]]; then
-    log_warn "자격 파일 경로 확인: $cred_file"
-  fi
-
-  log_info "【앞단 라우팅】 방문자가 볼 주소(호스트)와, 맥에서 이미 떠 있는 앱의 포트만 맞추면 됩니다."
-
-  local def_host="app.example.com" h_try=""
-  h_try="$(cloudflare_tunnel_default_public_hostname 2>/dev/null)" || true
-  [[ -n "$h_try" ]] && def_host="$h_try"
-
-  local hostname
-  hostname="$(prompt_with_default "인터넷에서 열릴 호스트 (예: app.example.com)" "$def_host")"
-
-  if prompt_yn "이 호스트를 터널에 DNS 로 자동 연결할까요? (도메인이 Cloudflare 에 있을 때)" "y"; then
-    cloudflared tunnel route dns "$tunnel_name" "$hostname" || log_warn "route dns 실패 — 웹에서 수동 가능"
-  fi
-
-  local port_def
-  port_def="$(cloudflare_tunnel_default_local_port "$work_dir")"
-  local port
-  port="$(prompt_with_default "맥 로컬 포트 (앱이 LISTEN 중인 포트 — 위에서 안내한 기본값)" "$port_def")"
-
-  log_info "적용 예: https://${hostname}  →  http://127.0.0.1:${port}  (TLS·터널은 cloudflared 가 처리)"
-
-  local cf_dir="$HOME/.cloudflared"
-  ensure_dir "$cf_dir"
-  local cfg="$cf_dir/config.yml"
-  if [[ -f "$cfg" ]]; then
-    cp "$cfg" "$cfg.bak.$(date +%Y%m%d%H%M%S)"
-    log_info "기존 config.yml 백업함"
-  fi
-
-  local svc="http://127.0.0.1:${port}"
-  {
-    printf '%s\n' "tunnel: $tunnel_id"
-    printf '%s\n' "credentials-file: $cred_file"
-    printf '%s\n' "ingress:"
-    printf '%s\n' "  - hostname: $hostname"
-    printf '%s\n' "    service: $svc"
-    printf '%s\n' "  - service: http_status:404"
-  } > "$cfg"
-
-  log_info "설정: $cfg"
-  log_info "테스트: cloudflared tunnel --config $(printf '%q' "$cfg") run $(printf '%q' "$tunnel_name")"
-
-  if prompt_yn "Tunnel도 재부팅 후 자동 실행할까요?" "y"; then
-    cloudflare_write_tunnel_plist "$tunnel_name" "$cfg"
-  fi
-}
-
-cloudflare_write_tunnel_plist() {
-  local tunnel_name="$1"
-  local cfg="$2"
-  local plist_dst="$HOME/Library/LaunchAgents/com.cloudflared.tunnel.plist"
-  local log_dir="$HOME/Library/Logs/CloudflaredTunnel"
-  ensure_dir "$log_dir"
-
-  local cloudflared_bin
-  cloudflared_bin="$(command -v cloudflared)"
-
-  cat > "$plist_dst" <<EOF
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-	<key>Label</key>
-	<string>com.cloudflared.tunnel</string>
-	<key>ProgramArguments</key>
-	<array>
-		<string>${cloudflared_bin}</string>
-		<string>tunnel</string>
-		<string>--config</string>
-		<string>${cfg}</string>
-		<string>run</string>
-		<string>${tunnel_name}</string>
-	</array>
-	<key>RunAtLoad</key>
-	<true/>
-	<key>KeepAlive</key>
-	<true/>
-	<key>StandardOutPath</key>
-	<string>${log_dir}/tunnel.log</string>
-	<key>StandardErrorPath</key>
-	<string>${log_dir}/tunnel.err.log</string>
-</dict>
-</plist>
-EOF
-
-  launchctl bootout "gui/$(id -u)/com.cloudflared.tunnel" 2>/dev/null || true
-  launchctl bootstrap "gui/$(id -u)" "$plist_dst"
-  launchctl kickstart -k "gui/$(id -u)/com.cloudflared.tunnel" 2>/dev/null || true
-  log_info "Tunnel LaunchAgent 등록"
-}
-
-# 대시보드에서 "Tunnel만" 터미널로 열 때
-tunnel_only_main() {
-  export CURSOR_SETUP_DASHBOARD_CF_LOCKED=1
-  export CURSOR_SETUP_WITH_CF=1
-  if [[ "${CURSOR_SETUP_CF_FORCE:-0}" != "1" ]]; then
-    export CURSOR_SETUP_CF_FORCE=0
-  fi
-  log_info "Cloudflare Tunnel 단계만 진행합니다."
-  preflight_main
-  local wd="${CURSOR_SETUP_TUNNEL_WORKSPACE:-}"
-  [[ -z "$wd" && -n "${1:-}" ]] && wd="$1"
-  [[ -z "$wd" ]] && wd="${CURSOR_SETUP_DEFAULT_WORKSPACE:-}"
-  [[ -z "$wd" ]] && declare -F cursor_setup_default_workspace_dir >/dev/null 2>&1 && wd="$(cursor_setup_default_workspace_dir)"
-  [[ -z "$wd" ]] && wd="."
-  wd="$(expand_tilde "$wd")"
-  local wd_res
-  wd_res="$(cd "$wd" 2>/dev/null && pwd -P)" || true
-  [[ -n "$wd_res" ]] && wd="$wd_res"
-  cloudflare_tunnel_main "$wd"
-}
-
 # --- scripts/lib/summary.sh.sh ---
 # 마무리: 짧은 안내 + 상태 요약
 
@@ -5664,7 +4928,7 @@ summary_main() {
   local work_dir="${1:-}"
   local repo_name="${2:-}"
 
-  log_info "[5/5] 마무리"
+  log_info "[4/4] 마무리"
 
   if declare -F status_dashboard_print >/dev/null 2>&1; then
     status_dashboard_print "$work_dir" "$repo_name"
@@ -5712,8 +4976,6 @@ workspace_setup_main() {
   export CURSOR_SETUP_WORKSPACE_LOCKED=1
   export CURSOR_SETUP_WORK_DIR="$wd"
   export CURSOR_SETUP_GUI=0
-  export CURSOR_SETUP_DASHBOARD_CF_LOCKED=1
-  export CURSOR_SETUP_WITH_CF=0
   export CURSOR_SETUP_SKIP_FINISH_GUI=1
 
   log_info "선택한 폴더만 설정합니다: $wd"
@@ -5836,7 +5098,7 @@ fi
 
 usage() {
   cat <<'EOF'
-맥미니 통합 셋업 (Cursor + GitHub + 선택 Cloudflare Tunnel)
+맥미니 통합 셋업 (Cursor + GitHub)
 
 실행 파일
   • 이 저장소를 쓸 때:  프로젝트 폴더의 ./setup
@@ -5852,12 +5114,9 @@ usage() {
 옵션:
   --full-wizard       터미널에서 처음부터 전체 마법사 (구 방식)
   --workspace PATH    위와 동일 흐름을 터미널에서 바로 (대시보드 없이)
-  --tunnel-only       Cloudflare Tunnel 단계만 터미널에서
   --interactive       질문을 하나씩 터미널에서 물어봄 (기본은 자동으로 기본값만 사용)
   --gui               전체 마법사 + 창(osa) 질문
   --cli               환영/대시보드 없이 터미널 전체 마법사
-  --with-cloudflare   Tunnel 포함해 전체 마법사
-  --skip-cloudflare   Tunnel 제외 전체 마법사
   --dry-run           명령만 보여 주기
   --status [폴더]     터미널에 상태만 (기본: CURSOR_SETUP_DEFAULT_WORKSPACE 또는 이 저장소 루트)
   --dashboard         기본과 동일 (로컬 대시보드 서버)
@@ -5870,8 +5129,6 @@ EOF
 CURSOR_SETUP_DRY_RUN=0
 CURSOR_SETUP_RUN_MAIN=0
 CURSOR_SETUP_WORKSPACE_PATH=""
-CURSOR_SETUP_TUNNEL_ONLY=0
-
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --dry-run) CURSOR_SETUP_DRY_RUN=1; export CURSOR_SETUP_DRY_RUN; CURSOR_SETUP_RUN_MAIN=1; shift ;;
@@ -5905,24 +5162,6 @@ while [[ $# -gt 0 ]]; do
       fi
       shift
       CURSOR_SETUP_RUN_MAIN=1
-      ;;
-    --tunnel-only)
-      CURSOR_SETUP_TUNNEL_ONLY=1
-      CURSOR_SETUP_RUN_MAIN=1
-      shift
-      ;;
-    --with-cloudflare)
-      export CURSOR_SETUP_WITH_CF=1
-      export CURSOR_SETUP_CF_FORCE=1
-      export CURSOR_SETUP_CF_USER_PRESET=1
-      CURSOR_SETUP_RUN_MAIN=1
-      shift
-      ;;
-    --skip-cloudflare)
-      export CURSOR_SETUP_WITH_CF=0
-      export CURSOR_SETUP_CF_USER_PRESET=1
-      CURSOR_SETUP_RUN_MAIN=1
-      shift
       ;;
     --dashboard)
       shift
@@ -5961,16 +5200,6 @@ if [[ -n "$CURSOR_SETUP_WORKSPACE_PATH" ]]; then
   exit 0
 fi
 
-if [[ "$CURSOR_SETUP_TUNNEL_ONLY" == "1" ]]; then
-  gui_after_parse_choose_mode
-  if ! is_macos; then
-    log_err "macOS 전용"
-    exit 1
-  fi
-  tunnel_only_main
-  exit 0
-fi
-
 if [[ "$CURSOR_SETUP_RUN_MAIN" == "1" ]]; then
   gui_after_parse_choose_mode
 
@@ -5985,8 +5214,6 @@ if [[ "$CURSOR_SETUP_RUN_MAIN" == "1" ]]; then
     github_main
 
     cursor_agent_main "$CURSOR_SETUP_WORK_DIR"
-
-    cloudflare_tunnel_main "$CURSOR_SETUP_WORK_DIR"
 
     summary_main "$CURSOR_SETUP_WORK_DIR" "$CURSOR_SETUP_REPO_NAME"
   }

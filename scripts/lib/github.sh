@@ -74,7 +74,7 @@ github_repo_name_from_remote_url() {
 }
 
 github_main() {
-  log_info "[2/5] Git · GitHub"
+  log_info "[2/4] Git · GitHub"
 
   local default_work="${CURSOR_SETUP_DEFAULT_WORKSPACE:-}"
   [[ -z "$default_work" ]] && default_work="${CURSOR_SETUP_ROOT:-$HOME}"

@@ -12,8 +12,6 @@ workspace_setup_main() {
   export CURSOR_SETUP_WORKSPACE_LOCKED=1
   export CURSOR_SETUP_WORK_DIR="$wd"
   export CURSOR_SETUP_GUI=0
-  export CURSOR_SETUP_DASHBOARD_CF_LOCKED=1
-  export CURSOR_SETUP_WITH_CF=0
   export CURSOR_SETUP_SKIP_FINISH_GUI=1
 
   log_info "선택한 폴더만 설정합니다: $wd"

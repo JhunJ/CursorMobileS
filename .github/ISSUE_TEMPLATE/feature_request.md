@@ -19,7 +19,6 @@ What should change?
 Please describe where this fits:
 - [ ] Cursor Agent setup
 - [ ] Worker lifecycle (LaunchAgent)
-- [ ] Cloudflare tunnel/domain flow
 - [ ] Dashboard UX
 - [ ] Docs / onboarding
 - [ ] Other

@@ -1,17 +1,17 @@
 # CursorMobileS
 
-**Opinionated macOS setup for [Cursor](https://cursor.com) Agent, GitHub, and optional [Cloudflare Tunnel](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/) — with a local browser dashboard so you can drive everything from one place.**
+**Opinionated macOS setup for [Cursor](https://cursor.com) Agent and GitHub — with a local browser dashboard so you can drive everything from one place.**
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Platform](https://img.shields.io/badge/platform-macOS-lightgrey.svg)]()
 [![CI](https://github.com/JhunJ/CursorMobileS/actions/workflows/ci.yml/badge.svg)](https://github.com/JhunJ/CursorMobileS/actions/workflows/ci.yml)
 [![Release Bundle](https://github.com/JhunJ/CursorMobileS/actions/workflows/release.yml/badge.svg)](https://github.com/JhunJ/CursorMobileS/actions/workflows/release.yml)
 
-Turn a Mac (Mac mini on the desk, or any Mac you SSH into) into a repeatable “dev box” profile: install prerequisites, wire GitHub (`gh`), install the Cursor Agent CLI, register a LaunchAgent worker, and optionally expose services through Cloudflare — without memorizing a long checklist.
+Turn a Mac (Mac mini on the desk, or any Mac you SSH into) into a repeatable “dev box” profile: install prerequisites, wire GitHub (`gh`), install the Cursor Agent CLI, and register a LaunchAgent worker — without memorizing a long checklist.
 
 ### On GitHub (find & share)
 
-The [repository About](https://github.com/JhunJ/CursorMobileS) lists **topics** such as `cursor-agent`, `macos`, `github-cli`, `cloudflare-tunnel`, `launchagent`, and `onboarding` so it shows up in GitHub search and Explore. Use **[Discussions](https://github.com/JhunJ/CursorMobileS/discussions)** for Q&A and ideas; use **[Issues](https://github.com/JhunJ/CursorMobileS/issues)** for bugs.
+The [repository About](https://github.com/JhunJ/CursorMobileS) lists **topics** such as `cursor-agent`, `macos`, `github-cli`, `launchagent`, and `onboarding` so it shows up in GitHub search and Explore. Use **[Discussions](https://github.com/JhunJ/CursorMobileS/discussions)** for Q&A and ideas; use **[Issues](https://github.com/JhunJ/CursorMobileS/issues)** for bugs.
 
 ### Why this feels good in practice
 
@@ -42,7 +42,7 @@ This screen gives you the full command center: sidebar steps, quick check, and w
 
 ### Screen B — Quick Check expanded
 
-Open the **Quick check** fold to verify `Tunnel`, `GitHub`, `Agent CLI`, and `Worker` before you do anything else.
+Open the **Quick check** fold to verify `GitHub`, `Agent CLI`, and `Worker` before you do anything else.
 
 ![Screen B — Quick check expanded](docs/screenshots/02-quick-check-expanded.png)
 
@@ -65,7 +65,7 @@ Use this for **continue setup** and project-specific execution.
 | Order | Where to click | Why |
 |------|-----------------|-----|
 | **1** | Sidebar **Add folder in Finder** | Register roots so projects appear. |
-| **2** | Sidebar **Run setup script** | Run full setup path (Tunnel/GitHub/Agent). |
+| **2** | Sidebar **Run setup script** | Run full setup path (GitHub/Agent). |
 | **3** | Expand **Quick check** | Confirm top-level integrations are healthy. |
 | **4** | Open the target workspace row | Continue setup only for the target repo. |
 | **5** | **Refresh** | Re-sync statuses and running ports. |
@@ -96,7 +96,7 @@ flowchart LR
 
 - **Sidebar step 1**: workspace root registration (`workspaces.txt` source).  
 - **Sidebar step 2**: full setup entrypoint in Terminal.  
-- **Quick check**: health summary for Tunnel/GitHub/Agent/Worker.  
+- **Quick check**: health summary for GitHub/Agent/Worker.  
 - **Workspace row fold**: per-project action menu and details.  
 - **Refresh**: status/port rescan without restarting.
 
@@ -129,7 +129,6 @@ flowchart LR
 
 - You run **Cursor Agent** on a Mac and want **LaunchAgent** + logs in predictable locations.
 - You use **GitHub** and want **`gh` auth**, remotes, and repo hygiene without repeating manual steps.
-- You might use **Cloudflare Tunnel** to reach dev servers from another device.
 - You like a **local web UI** (no cloud account for the dashboard itself) that lists projects and opens Terminal where the script continues only what is still missing.
 
 ---
@@ -160,7 +159,6 @@ flowchart TB
 
   subgraph Remote["Optional / external"]
     GH[GitHub API]
-    CF[Cloudflare Tunnel]
     CR[Cursor install / agent]
   end
 
@@ -170,7 +168,6 @@ flowchart TB
   T --> S
   S --> L
   S --> GH
-  S --> CF
   S --> CR
   S --> LA
 ```
@@ -189,7 +186,7 @@ sequenceDiagram
   U->>Dash: Click “continue setup” for a folder
   Dash->>Term: Open Terminal with that folder
   Term->>Setup: Run setup for workspace
-  Setup->>Setup: Git / gh / agent / tunnel as needed
+  Setup->>Setup: Git / gh / agent as needed
 ```
 
 ---
@@ -202,11 +199,9 @@ The UI is intentionally **GitHub Desktop–inspired**: a sidebar, a main column 
 
 | Area | What it tells you |
 |------|-------------------|
-| **Cloudflare Tunnel** | Whether `~/.cloudflared` looks configured, tunnel process / LaunchAgent state, and a short summary of hostname → service when available. |
 | **GitHub** | Whether `gh` is logged in (and your username when the CLI allows it). |
 | **Cursor Agent** | Whether `~/.local/bin/agent` is installed. |
 | **Cursor worker (global)** | LaunchAgent `com.cursor.agent.worker` — plist present, running or stopped, and which **working directory** it is bound to. |
-| **cloudflared** | Background tunnel process or `com.cloudflared.tunnel` LaunchAgent. |
 
 Status dots are a quick read: healthy / warning / not configured.
 
@@ -318,10 +313,8 @@ The dashboard can also help **register** entries; they are merged into this JSON
 | Default | `./setup` — local dashboard |
 | Full wizard | `./setup --full-wizard` |
 | One workspace (no dashboard) | `./setup --workspace /path/to/project` |
-| Cloudflare only | `./setup --tunnel-only` |
 | GUI prompts (osascript) | `./setup --gui` |
 | Terminal-only wizard | `./setup --cli` |
-| With / without tunnel (preset) | `./setup --with-cloudflare` / `./setup --skip-cloudflare` |
 | Print status | `./setup --status [folder]` |
 | Dry run | `./setup --dry-run` |
 | Help | `./setup --help` |
@@ -361,11 +354,10 @@ Quick local validation:
 - The dashboard server binds to **localhost by default** (`127.0.0.1`) to reduce accidental LAN exposure.
 - To intentionally open it on LAN, use `CURSOR_DASH_LAN=1 ./setup` (or set `CURSOR_DASH_HOST=0.0.0.0`) on a trusted network only.
 - Dashboard POST actions apply a same-origin check and standard browser security headers (CSP / frame deny / nosniff).
-- **Secrets** (`cloudflared` credentials, env files) must stay out of git — see [`.gitignore`](.gitignore).
-- **Cloudflare Tunnel:** keep `~/.cloudflared/` only on your Mac. Ingress `service:` should be **`http://127.0.0.1:<port>`** — not your public WAN IP. The tunnel agent connects out to Cloudflare; visitors never need to reach `218.x.x.x:port` on your router.
-- Before `git push`, run **`./scripts/git-safe-verify.sh`** to catch tracked private keys, stray `.cloudflared/` copies, or YAML that points ingress at a public IPv4.
+- **Secrets** (env files, tokens) must stay out of git — see [`.gitignore`](.gitignore).
+- Before `git push`, run **`./scripts/git-safe-verify.sh`** to catch tracked private keys and other sensitive paths.
 - Scripts may run **`curl | bash`** for the official Cursor install script when you opt in — review [Cursor’s install documentation](https://cursor.com) if you need to comply with corporate policy.
-- **`gh`** and **Cloudflare** steps require you to authenticate with those providers; nothing in this repo replaces their OAuth or token flows.
+- **`gh`** requires you to authenticate with GitHub; nothing in this repo replaces GitHub’s OAuth or token flows.
 
 ---
 
@@ -373,8 +365,8 @@ Quick local validation:
 
 - **macOS** (the entrypoint checks for Darwin).
 - **Python 3** for the default dashboard server.
-- **Git**; **Homebrew** recommended for `gh` and `cloudflared`.
-- Network access when installing tools or talking to GitHub / Cloudflare / Cursor.
+- **Git**; **Homebrew** recommended for `gh`.
+- Network access when installing tools or talking to GitHub / Cursor.
 
 ---
 
@@ -386,4 +378,4 @@ This project is licensed under the [MIT License](LICENSE).
 
 ## Acknowledgements
 
-Built for workflows around **Cursor**, **GitHub CLI**, and **Cloudflare Tunnel**. Product names belong to their respective owners.
+Built for workflows around **Cursor** and **GitHub CLI**. Product names belong to their respective owners.

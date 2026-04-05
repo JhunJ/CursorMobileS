@@ -8,7 +8,6 @@ CursorMobileS is a macOS-first setup toolkit focused on:
 
 - Cursor Agent worker lifecycle
 - GitHub CLI onboarding
-- Optional Cloudflare Tunnel for cross-device checks
 - Local dashboard UX
 
 ## Development workflow

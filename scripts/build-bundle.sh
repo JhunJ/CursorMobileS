@@ -24,7 +24,7 @@ export CURSOR_SETUP_ROOT="$ROOT"
 
 HEADER
 
-  for name in common status_report workspace_services dashboard_html dashboard_flow gui preflight github cursor_agent cloudflare_tunnel summary workspace_flow; do
+  for name in common status_report workspace_services dashboard_html dashboard_flow gui preflight github cursor_agent summary workspace_flow; do
     printf '# --- scripts/lib/%s.sh ---\n' "$name.sh"
     tail -n +2 "$REPO_ROOT/scripts/lib/${name}.sh"
     printf '\n'

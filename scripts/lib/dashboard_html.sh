@@ -26,30 +26,6 @@ _dashboard_card() {
 }
 
 dashboard_global_cards_html() {
-  local cf_dot cf_title cf_body cf_extra cf_line tid host svc
-  cf_title="$(_d "Cloudflare Tunnel" "Cloudflare Tunnel")"
-  if cloudflare_looks_connected; then
-    cf_dot="ok"
-    if cf_line=$(parse_cf_config_summary 2>/dev/null); then
-      IFS=$'\t' read -r tid host svc <<<"$cf_line"
-      cf_body="$(_d "구성됨" "Configured")"
-      cf_extra="$(_d "도메인" "Domain") ${host:-?} → ${svc:-?}"
-    else
-      cf_body="$(_d "연결로 판단됨" "Connected (inferred)")"
-      cf_extra="$(_d "config.yml 확인" "Check config.yml")"
-    fi
-    if cloudflare_tunnel_running; then
-      cf_body="${cf_body} · $(_d "터널 동작 중" "tunnel running")"
-    else
-      cf_body="${cf_body} · $(_d "터널 프로세스 없음" "no tunnel process")"
-    fi
-  else
-    cf_dot="bad"
-    cf_body="$(_d "연결·설정 없음" "Not connected")"
-    cf_extra="~/.cloudflared/config.yml · cert · credentials.json"
-  fi
-  _dashboard_card "$cf_dot" "$cf_title" "$cf_body" "$cf_extra"
-
   if github_cli_logged_in; then
     _dashboard_card "ok" "GitHub" "$(_d "로그인됨" "Signed in") ($(gh api user -q .login 2>/dev/null || echo "$(_d "계정" "account")"))" ""
   else
@@ -82,18 +58,6 @@ dashboard_global_cards_html() {
     _dashboard_card "warn" "$(_d "Cursor 워커" "Cursor workers")" "$(_d "프로세스만 실행 중" "Process only")" "$(_d "LaunchAgent 없음" "No LaunchAgent")"
   else
     _dashboard_card "bad" "$(_d "Cursor 워커" "Cursor workers")" "$(_d "미등록" "Not registered")" "$(_d "프로젝트 카드에서 셋업" "Set up from a project card")"
-  fi
-
-  if [[ -f "$HOME/Library/LaunchAgents/com.cloudflared.tunnel.plist" ]]; then
-    if launchagent_running "com.cloudflared.tunnel"; then
-      _dashboard_card "ok" "$(_d "cloudflared 서비스" "cloudflared service")" "$(_d "Tunnel LaunchAgent 동작" "Tunnel LaunchAgent running")" ""
-    else
-      _dashboard_card "warn" "$(_d "cloudflared 서비스" "cloudflared service")" "$(_d "plist 등록 · 멈춤" "plist loaded · stopped")" ""
-    fi
-  elif cloudflared_process_running; then
-    _dashboard_card "ok" "cloudflared" "$(_d "터널 프로세스 실행 중" "Tunnel process running")" ""
-  else
-    _dashboard_card "warn" "cloudflared" "$(_d "백그라운드 터널 없음" "No background tunnel")" ""
   fi
 }
 
@@ -161,17 +125,9 @@ workspace_gap_hint_for_path() {
   fi
 }
 
-dashboard_global_actions_html() {
-  printf '    <div class="section-title section-muted">%s</div>\n' "$(_d "고급" "More")"
-  printf '    <div class="action-row">\n'
-  printf '      <form method="post" action="/tunnel"><button type="submit" class="btn btn-secondary">Tunnel</button></form>\n'
-  printf '    </div>\n'
-}
-
 # 접힌 요약 줄: 항목마다 동그라미+라벨 (CURSOR_DASH_LANG 한 벌만)
 dashboard_quick_check_summary_html() {
-  local d_cf d_gh d_ag d_wk lb_cf lb_gh lb_ag lb_wk
-  if cloudflare_looks_connected; then d_cf=ok; else d_cf=bad; fi
+  local d_gh d_ag d_wk lb_gh lb_ag lb_wk
   if github_cli_logged_in; then d_gh=ok; else d_gh=bad; fi
   if [[ -x "$HOME/.local/bin/agent" ]]; then
     if cursor_agent_state_file_present; then d_ag=ok; else d_ag=warn; fi
@@ -188,13 +144,11 @@ dashboard_quick_check_summary_html() {
   else
     d_wk=bad
   fi
-  lb_cf="$(_d "터널" "Tunnel")"
   lb_gh="GitHub"
   lb_ag="$(_d "Agent CLI" "Agent CLI")"
   lb_wk="$(_d "워커" "Worker")"
   printf '      <span class="qc-title">%s</span>\n' "$(_d "빠른 점검" "Quick check")"
   printf '      <span class="qc-pairs" role="list">\n'
-  printf '        <span class="qc-pair" role="listitem"><span class="dot %s"></span><span class="qc-lbl">%s</span></span>\n' "$d_cf" "$(html_escape "$lb_cf")"
   printf '        <span class="qc-pair" role="listitem"><span class="dot %s"></span><span class="qc-lbl">%s</span></span>\n' "$d_gh" "$(html_escape "$lb_gh")"
   printf '        <span class="qc-pair" role="listitem"><span class="dot %s"></span><span class="qc-lbl">%s</span></span>\n' "$d_ag" "$(html_escape "$lb_ag")"
   printf '        <span class="qc-pair" role="listitem"><span class="dot %s"></span><span class="qc-lbl">%s</span></span>\n' "$d_wk" "$(html_escape "$lb_wk")"
@@ -238,12 +192,11 @@ _dashboard_sidebar_locale_body_html() {
   printf '          <summary>%s</summary>\n' "$(_d "고급: 파일로 편집" "Advanced: edit config files")"
   printf '        <form method="post" action="/action/open-user-workspaces" class="choice-form"><button type="submit" class="btn-choice"><span class="btn-choice-main"><span>%s</span><span class="btn-choice-sub">%s</span></span><span class="chev">›</span></button></form>\n' "$(_d "폴더 목록 편집" "Edit folder list")" ""
   printf '        <form method="post" action="/action/open-user-services-jsonl" class="choice-form"><button type="submit" class="btn-choice"><span class="btn-choice-main"><span>%s</span><span class="btn-choice-sub">workspace-services.jsonl</span></span><span class="chev">›</span></button></form>\n' "$(_d "실행·포트" "Run / port")"
-  printf '        <form method="post" action="/action/open-cloudflared-config" class="choice-form"><button type="submit" class="btn-choice"><span class="btn-choice-main"><span>%s</span><span class="btn-choice-sub">~/.cloudflared/config.yml</span></span><span class="chev">›</span></button></form>\n' "$(_d "Tunnel 설정" "Tunnel config")"
   printf '        </details>\n'
   printf '      </div>\n'
   _sn=$((_sn + 1))
   printf '      <div class="step-card">\n'
-  printf '        <div class="step-label"><span class="step-num">%s</span>%s</div>\n' "$_sn" "$(_d "터널·GitHub·Agent" "Tunnel, GitHub, Agent")"
+  printf '        <div class="step-label"><span class="step-num">%s</span>%s</div>\n' "$_sn" "$(_d "GitHub·Agent" "GitHub & Agent")"
   printf '        <p class="step-desc">%s</p>\n' "$(_d "설치 마법사를 실행합니다. 이미 끝냈으면 건너뛰어도 됩니다." "Run the setup wizard. Skip if you already finished.")"
   printf '        <form method="post" action="/launch-setup" class="choice-form"><button type="submit" class="btn-choice"><span class="btn-choice-main"><span>%s</span><span class="btn-choice-sub mono">%s</span></span><span class="chev">›</span></button></form>\n' "$(_d "셋업 스크립트 실행" "Run setup script")" "$(html_escape "$_setup_bn")"
   printf '      </div>\n'
@@ -264,48 +217,7 @@ _dashboard_sidebar_locale_body_html() {
 
 # 로컬 서버 대시보드: 카드마다 눌러서 터미널에서 이어가기
 dashboard_global_cards_html_interactive() {
-  local cf_line tid host svc cf_body gh_user agent_bin cf_dot h s ingress_data
-  if cloudflare_looks_connected; then cf_dot="ok"; else cf_dot="bad"; fi
-  printf '      <div class="card card-setup">\n'
-  printf '        <div class="card-h"><span class="dot %s"></span>%s</div>\n' "$cf_dot" "$(_d "Cloudflare" "Cloudflare")"
-  printf '        <p class="cf-hint-line">%s</p>\n' "$(_d "도메인·포트는 <strong>프로젝트</strong> 카드에서" "Match domain ↔ port in each <strong>project</strong> card")"
-  if cloudflare_looks_connected; then
-    if cloudflare_tunnel_running; then
-      cf_body="$(_d "터널 동작 중" "Tunnel running")"
-    else
-      cf_body="$(_d "설정됨 · 터널 대기" "Ready · tunnel idle")"
-    fi
-    printf '        <p class="card-lead ok">%s</p>\n' "$(html_escape "$cf_body")"
-    ingress_data=$(cloudflare_config_ingress_pairs)
-    printf '        <ul class="cf-routes mono">\n'
-    if [[ -z "$ingress_data" ]]; then
-      if cf_line=$(parse_cf_config_summary 2>/dev/null); then
-        IFS=$'\t' read -r tid host svc <<<"$cf_line"
-        if [[ -n "$host" && "$host" != "?" ]]; then
-          printf '            <li>%s → %s</li>\n' "$(html_escape "$host")" "$(html_escape "${svc:-?}")"
-        else
-          printf '            <li>—</li>\n'
-        fi
-      else
-        printf '            <li>—</li>\n'
-      fi
-    else
-      while IFS=$'\t' read -r h s || [[ -n "$h" ]]; do
-        [[ -z "$h" ]] && continue
-        [[ "$h" == \[* ]] && continue
-        printf '            <li>%s → %s</li>\n' "$(html_escape "$h")" "$(html_escape "$s")"
-      done <<<"$ingress_data"
-    fi
-    printf '        </ul>\n'
-    printf '        <div class="card-actions">\n'
-    printf '          <form method="post" action="/tunnel"><button type="submit" class="btn btn-secondary btn-small btn-pill">%s</button></form>\n' "$(_d "Tunnel 마법사" "Tunnel setup")"
-    printf '        </div>\n'
-  else
-    printf '        <p class="card-lead bad">%s</p>\n' "$(_d "미설정" "Not set")"
-    printf '        <form method="post" action="/tunnel"><button type="submit" class="btn btn-pill">%s</button></form>\n' "$(_d "Tunnel 마법사" "Tunnel setup")"
-  fi
-  printf '      </div>\n'
-
+  local gh_user agent_bin
   printf '      <div class="card card-setup">\n'
   if github_cli_logged_in; then
     gh_user="$(gh api user -q .login 2>/dev/null || true)"
@@ -647,46 +559,6 @@ print('svc_exec_path=' + shlex.quote(d.get('exec') or ''))
     printf '          </div>\n'
     printf '        </details>\n'
     printf '      </div>\n'
-    printf '      <div class="ws-tunnel">\n'
-    printf '        <div class="ws-svc-head"><span class="ws-svc-title">%s</span><span class="ws-svc-note">%s</span></div>\n' "$(_d "공개 주소" "Public URL")" "$(_d "Tunnel ↔ 포트" "Tunnel ↔ port")"
-    if [[ -z "$cf_show_ports" ]]; then
-      printf '        <p class="ws-tunnel-hint">%s</p>\n' "$(_d "포트가 있으면 config.yml 과 대조해 도메인을 표시합니다." "Set a port to see matching domains from config.yml.")"
-    else
-      _rest="$cf_show_ports,"
-      while [[ -n "$_rest" ]]; do
-        _tp="${_rest%%,*}"
-        _rest="${_rest#*,}"
-        _tp="${_tp// /}"
-        [[ "$_tp" =~ ^[0-9]+$ ]] || continue
-        _cf_hn_list=()
-        while IFS= read -r _hn || [[ -n "$_hn" ]]; do
-          [[ -z "$_hn" ]] && continue
-          _cf_hn_list+=("$_hn")
-        done < <(cloudflare_hostnames_for_port "$_tp")
-        _anyh=${#_cf_hn_list[@]}
-        if [[ "$_anyh" -gt 0 ]]; then
-          printf '        <div class="ws-tunnel-row ws-tunnel-row--matched"><span class="mono">%s %s</span> · ' "$(_d "포트" "Port")" "$(html_escape "$_tp")"
-          for _hn in "${_cf_hn_list[@]}"; do
-            printf '<a class="ws-tunnel-link" href="https://%s/" target="_blank" rel="noopener noreferrer">%s</a> ' "$(html_escape "$_hn")" "$(html_escape "$_hn")"
-          done
-          printf '<span class="ws-tunnel-ok">%s</span>' "$(_d "터널과 포트 일치" "Tunnel matches this port")"
-        else
-          printf '        <div class="ws-tunnel-row"><span class="mono">%s %s</span> · ' "$(_d "포트" "Port")" "$(html_escape "$_tp")"
-          printf '<span class="ws-tunnel-miss">%s</span>' "$(_d "연결된 도메인 없음" "No domain for this port")"
-          if cloudflare_looks_connected; then
-            _cf_ing_ports="$(cloudflare_config_ingress_local_ports_unique_csv)"
-            if [[ -n "$_cf_ing_ports" ]]; then
-              printf ' <span class="ws-tunnel-miss-hint">%s <span class="mono">%s</span></span>' "$(_d "config ingress 포트:" "config ingress ports:")" "$(html_escape "$_cf_ing_ports")"
-            fi
-          fi
-        fi
-        printf '</div>\n'
-      done
-    fi
-    printf '        <div class="ws-svc-actions" style="margin-top:8px">\n'
-    printf '          <form method="post" action="/tunnel-workspace"><input type="hidden" name="path" value="%s" /><button type="submit" class="btn btn-secondary btn-small btn-pill">%s</button></form>\n' "$(html_escape "$ws")" "$(_d "Tunnel 맞추기" "Match tunnel")"
-    printf '        </div>\n'
-    printf '      </div>\n'
     printf '      <details class="repo-more">\n'
     printf '        <summary class="repo-more-summary">%s</summary>\n' "$(_d "저장소 · 경로 · 워커" "Repo · path · worker")"
     printf '        <div class="repo-more-body">\n'
@@ -761,8 +633,10 @@ dashboard_emit_html_template() {
   .main { padding:22px 24px 40px; max-width:1040px; margin:0 auto; width:100%; }
   .section-title { font-size:11px; font-weight:600; color:var(--muted); text-transform:uppercase; margin:0 0 10px; letter-spacing:.06em; }
   .grid { display:grid; gap:14px; margin-bottom:24px; }
-  .grid-setup { grid-template-columns:repeat(2, minmax(0,1fr)); align-items:stretch; }
-  @media (max-width:640px){ .grid-setup { grid-template-columns:1fr; } }
+  /* 빠른 점검 카드 3개를 한 행에 균등 배치 (2열이면 3번째 행에 오른쪽 빈 칸이 생김) */
+  .grid-setup { grid-template-columns:repeat(3, minmax(0,1fr)); align-items:stretch; }
+  @media (max-width:768px){ .grid-setup { grid-template-columns:1fr; } }
+  .quick-check-grid > .card { min-height:100%; }
   .card { background:var(--surface); border:1px solid var(--border); border-radius:8px; padding:14px; }
   .card-setup { display:flex; flex-direction:column; align-items:flex-start; gap:8px; min-height:0; }
   .card-h { font-weight:600; font-size:13px; display:flex; align-items:center; gap:8px; margin-bottom:4px; }
@@ -901,22 +775,10 @@ dashboard_emit_html_template() {
   .ws-exec-pick-row { display:flex; flex-wrap:wrap; gap:8px; align-items:center; }
   .ws-exec-port-label { font-size:11px; color:var(--muted); display:inline-flex; align-items:center; gap:6px; margin-left:4px; }
   .ws-exec-port-input { width:92px; padding:6px 8px; border-radius:6px; border:1px solid var(--border); background:#0d1117; color:var(--text); font-size:12px; }
-  .cf-routes { margin:2px 0 0; padding-left:14px; font-size:11px; line-height:1.4; color:var(--text); max-height:72px; overflow-y:auto; }
-  .cf-routes li { margin:3px 0; word-break:break-word; }
-  .cf-hint-line { font-size:11px; color:var(--muted); margin:0; line-height:1.35; }
   .path-chip { display:inline-block; padding:3px 8px; border-radius:999px; background:#21262d; border:1px solid var(--border); font-size:11px; max-width:100%; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; vertical-align:middle; }
   .btn-pill { border-radius:999px !important; }
   .card-actions-chips { gap:6px !important; }
   .action-row-chips { gap:8px !important; }
-  .ws-tunnel { margin:10px 0 12px; padding:12px 14px; background:#0c1629; border:1px solid var(--border); border-radius:8px; }
-  .ws-tunnel-hint { font-size:11px; color:var(--muted); margin:0; line-height:1.45; }
-  .ws-tunnel-row { font-size:12px; margin:6px 0; line-height:1.45; display:flex; flex-wrap:wrap; align-items:center; gap:6px; }
-  .ws-tunnel-row--matched { border-left:3px solid var(--ok); padding-left:10px; margin-left:-2px; border-radius:2px; }
-  .ws-tunnel-miss { color:var(--warn); font-size:11px; }
-  .ws-tunnel-miss-hint { color:var(--muted); font-size:10px; }
-  .ws-tunnel-ok { color:var(--ok); font-size:11px; font-weight:600; }
-  .ws-tunnel-link { color:var(--accent); text-decoration:none; font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:11px; }
-  .ws-tunnel-link:hover { text-decoration:underline; }
   .side-dash-actions-wrap { display:flex; flex-direction:column; gap:6px; margin-top:4px; }
   .side-dash-actions-wrap form { margin:0; }
   .sidebar-steps { display:flex; flex-direction:column; gap:10px; margin-top:4px; }
@@ -1205,7 +1067,7 @@ _dashboard_stay_script_fragment() {
           return;
         }
         var reloadQuick = ['/action/gh-login', '/action/agent-login', '/action/worker-kickstart'];
-        var reloadSlow = ['/action/agent-install', '/tunnel', '/tunnel-workspace', '/rename-repo', '/workspace-add-folder'];
+        var reloadSlow = ['/action/agent-install', '/rename-repo', '/workspace-add-folder'];
         if (reloadQuick.indexOf(act) !== -1) {
           if (bar) bar.textContent = L.reloadSoon;
           setTimeout(function () { window.location.reload(); }, 2200);

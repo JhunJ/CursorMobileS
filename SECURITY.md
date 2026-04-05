@@ -8,7 +8,7 @@ Security-sensitive areas include:
 - Local dashboard server actions (`setup` + `scripts/lib/dashboard_flow.sh`)
 - Shell command execution paths triggered from dashboard actions
 - Workspace path allowlist and file-handling logic
-- Credential-related files (`~/.cloudflared`, `.env`, GitHub auth state)
+- Credential-related files (`.env`, GitHub auth state, and similar local-only secrets)
 
 ## Secure Defaults
 
@@ -16,8 +16,6 @@ Security-sensitive areas include:
 - LAN exposure requires explicit opt-in (`CURSOR_DASH_LAN=1`, `CURSOR_DASH_HOST=0.0.0.0`, or create an empty `~/.cursor-setup/dashboard-bind-lan` so every `./setup` binds on all interfaces).
 - When bound to all interfaces, POST requests without `Origin`/`Referer` are allowed only from loopback or typical private LAN ranges (RFC1918 / link-local); same-origin rules still apply when those headers are present.
 - HTTP responses include defensive browser headers (CSP, frame deny, nosniff).
-- Cloudflare Tunnel configs written by this project use **`http://127.0.0.1:<port>`** for ingress `service:` — not the machine’s public IP. Credentials stay under **`~/.cloudflared/`** and must not be committed (see `.gitignore` and `./scripts/git-safe-verify.sh`).
-
 ## Reporting a Vulnerability
 
 If you find a security issue, please avoid opening a public issue with exploit details.

@@ -159,7 +159,7 @@ cursor_agent_main() {
     exit 1
   fi
 
-  log_info "[3/5] Cursor Agent"
+  log_info "[3/4] Cursor Agent"
 
   local path_line='export PATH="$HOME/.local/bin:$PATH"'
   append_line_once "$HOME/.zshrc" "$path_line"

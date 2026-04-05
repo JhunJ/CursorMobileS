@@ -8,7 +8,7 @@ summary_main() {
   local work_dir="${1:-}"
   local repo_name="${2:-}"
 
-  log_info "[5/5] 마무리"
+  log_info "[4/4] 마무리"
 
   if declare -F status_dashboard_print >/dev/null 2>&1; then
     status_dashboard_print "$work_dir" "$repo_name"
