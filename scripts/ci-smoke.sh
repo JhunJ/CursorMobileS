@@ -17,4 +17,7 @@ git diff --exit-code -- dist/MacMini-Cursor-Setup.command >/dev/null
 echo "[smoke] readme assets check"
 ./scripts/verify-readme-assets.sh >/dev/null
 
+echo "[smoke] git safe verify"
+./scripts/git-safe-verify.sh >/dev/null
+
 echo "[smoke] OK"

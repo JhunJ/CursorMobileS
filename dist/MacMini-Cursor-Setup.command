@@ -1393,24 +1393,8 @@ for pid, ports in pid_to_ports.items():
             for pt in ports:
                 result[ws0].append(pt)
             continue
-# 대시보드 내장 Python 서버: cwd 가 홈·tmp 스크립트라 폴더 매칭이 안 됨 → CURSOR_SETUP_ROOT 에 포트 부여
-_dash_p = os.environ.get("CURSOR_DASH_PORT", "").strip()
-_dash_r = os.environ.get("CURSOR_SETUP_ROOT", "").strip()
-if _dash_p.isdigit() and _dash_r:
-    try:
-        _drp = os.path.realpath(os.path.expanduser(_dash_r))
-    except OSError:
-        _drp = None
-    if _drp and _drp in result:
-        _dpi = int(_dash_p)
-        if _dpi not in result[_drp]:
-            for _pid, _pts in pid_to_ports.items():
-                if _dpi not in _pts:
-                    continue
-                _c = cmd_by_pid.get(_pid) or ""
-                if "Python" in _c or "python" in _c.lower():
-                    result[_drp].append(_dpi)
-                break
+# 대시보드 HTTP 포트는 프로젝트 dev 서버와 별개이므로 워크스페이스 LISTEN 목록에 넣지 않는다
+# (넣으면 '실행 중'에 대시보드 포트가 같이 뜨고, 포트 끄기로 대시보드까지 죽일 위험이 있음)
 for ws in paths:
     result[ws] = sorted(set(result[ws]))
 outp = os.environ.get("LISTEN_JSON_OUT", "")
@@ -1461,6 +1445,16 @@ _d() {
 
 html_escape() {
   printf '%s' "${1:-}" | sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g' -e 's/"/\&quot;/g'
+}
+
+# macOS: 사이드바 LAN 주소 표시용 (en0 → en1 → en2)
+dashboard_primary_ipv4() {
+  local ifn ip
+  for ifn in en0 en1 en2; do
+    ip="$(ipconfig getifaddr "$ifn" 2>/dev/null)" || true
+    [[ -n "$ip" ]] && printf '%s' "$ip" && return
+  done
+  printf ''
 }
 
 _dashboard_card() {
@@ -1703,6 +1697,15 @@ _dashboard_sidebar_locale_body_html() {
     printf '        <div class="step-label"><span class="step-num">%s</span>%s</div>\n' "$_sn" "$(_d "이 대시보드" "This dashboard")"
     printf '        <p class="step-desc">%s</p>\n' "$(_d "같은 주소로 다시 열 수 있습니다. 끝나면 서버를 꺼도 됩니다." "You can reopen this address anytime. Stop the server when you are done.")"
     printf '        <p style="margin:0 0 8px;font-size:12px"><a class="side-dash-url mono" href="http://127.0.0.1:%s/">127.0.0.1:%s</a></p>\n' "$(html_escape "$dash_port")" "$(html_escape "$dash_port")"
+    if [[ "${CURSOR_DASH_HOST:-127.0.0.1}" == "0.0.0.0" || "${CURSOR_DASH_HOST:-}" == "::" ]]; then
+      local _lip
+      _lip="$(dashboard_primary_ipv4)"
+      if [[ -n "$_lip" ]]; then
+        printf '        <p style="margin:0 0 8px;font-size:12px"><a class="side-dash-url mono" href="http://%s:%s/">%s:%s</a> <span class="small">%s</span></p>\n' \
+          "$(html_escape "$_lip")" "$(html_escape "$dash_port")" "$(html_escape "$_lip")" "$(html_escape "$dash_port")" \
+          "$(_d "(LAN · 이 맥 IPv4)" "(LAN · this Mac IPv4)")"
+      fi
+    fi
     printf '        <form method="post" action="/dashboard-stop" class="choice-form"><button type="submit" class="btn-choice"><span class="btn-choice-main"><span>%s</span><span class="btn-choice-sub">%s</span></span><span class="chev">›</span></button></form>\n' "$(_d "대시보드 서버 끄기" "Stop dashboard server")" ""
     printf '      </div>\n'
   fi
@@ -1859,6 +1862,7 @@ dashboard_workspace_rows_html_interactive() {
     local svc_shell svc_port svc_on svc_disp svc_exec_path disabled_attr stop_disabled stop_title _wsvc_json port_inp_extra
     local auto_csv primary_auto stop_port running_ports_label open_disabled open_title
     local cf_show_ports _rest _tp _hn _anyh _pp _cf_hn_list _cf_ing_ports
+    local stop_forms_ports _spf_rest _spf
     svc_shell=""
     svc_port=""
     svc_disp=""
@@ -2022,32 +2026,33 @@ print('svc_exec_path=' + shlex.quote(d.get('exec') or ''))
       disabled_attr=" disabled title=\"$(_d "이미 이 포트에서 실행 중" "Already running on this port")\""
     fi
     printf '          <form method="post" action="/workspace-service-start"><input type="hidden" name="path" value="%s" /><button type="submit" class="btn btn-secondary btn-small"%s>%s</button></form>\n' "$(html_escape "$ws")" "$disabled_attr" "$(_d "실행" "Start")"
-    stop_disabled=""
-    stop_title=""
-    if [[ -z "$stop_port" ]]; then
+    stop_forms_ports="${cf_show_ports}"
+    [[ -z "$stop_forms_ports" && -n "$stop_port" ]] && stop_forms_ports="$stop_port"
+    if [[ -z "$stop_forms_ports" ]]; then
       stop_disabled=" disabled"
       stop_title=" title=\"$(_d "포트 필요" "Port required")\""
-    fi
-    printf '          <form method="post" action="/workspace-service-stop"><input type="hidden" name="path" value="%s" />' "$(html_escape "$ws")"
-    [[ -n "$stop_port" ]] && printf '<input type="hidden" name="port" value="%s" />' "$(html_escape "$stop_port")"
-    if [[ -n "$stop_port" ]]; then
-      printf '<button type="submit" class="btn btn-secondary btn-small"%s%s>%s %s</button></form>\n' "$stop_disabled" "$stop_title" "$(_d "포트 끄기" "Stop")" "$(html_escape "$stop_port")"
-    else
+      printf '          <form method="post" action="/workspace-service-stop"><input type="hidden" name="path" value="%s" />' "$(html_escape "$ws")"
       printf '<button type="submit" class="btn btn-secondary btn-small"%s%s>%s</button></form>\n' "$stop_disabled" "$stop_title" "$(_d "포트 끄기" "Stop port")"
-    fi
-    printf '          <form method="post" action="/workspace-service-open"><input type="hidden" name="path" value="%s" />' "$(html_escape "$ws")"
-    [[ -n "$stop_port" ]] && printf '<input type="hidden" name="port" value="%s" />' "$(html_escape "$stop_port")"
-    if [[ -n "$stop_port" ]]; then
-      printf '<button type="submit" class="btn btn-secondary btn-small"%s%s>%s %s</button></form>\n' "$open_disabled" "$open_title" "$(_d "열기" "Open")" "$(html_escape "$stop_port")"
-    else
+      printf '          <form method="post" action="/workspace-service-open"><input type="hidden" name="path" value="%s" />' "$(html_escape "$ws")"
       printf '<button type="submit" class="btn btn-secondary btn-small"%s%s>%s</button></form>\n' "$open_disabled" "$open_title" "$(_d "열기" "Open")"
-    fi
-    printf '          <form method="post" action="/workspace-service-open"><input type="hidden" name="path" value="%s" /><input type="hidden" name="network" value="1" />' "$(html_escape "$ws")"
-    [[ -n "$stop_port" ]] && printf '<input type="hidden" name="port" value="%s" />' "$(html_escape "$stop_port")"
-    if [[ -n "$stop_port" ]]; then
+      printf '          <form method="post" action="/workspace-service-open"><input type="hidden" name="path" value="%s" /><input type="hidden" name="network" value="1" />' "$(html_escape "$ws")"
       printf '<button type="submit" class="btn btn-secondary btn-small"%s%s>%s</button></form>\n' "$open_disabled" "$open_title" "$(_d "LAN 열기" "Open on LAN")"
     else
-      printf '<button type="submit" class="btn btn-secondary btn-small"%s%s>%s</button></form>\n' "$open_disabled" "$open_title" "$(_d "LAN 열기" "Open on LAN")"
+      _spf_rest="${stop_forms_ports},"
+      while [[ -n "$_spf_rest" ]]; do
+        _spf="${_spf_rest%%,*}"
+        _spf_rest="${_spf_rest#*,}"
+        _spf="${_spf// /}"
+        [[ "$_spf" =~ ^[0-9]+$ ]] || continue
+        printf '          <span class="ws-svc-per-port" role="group" aria-label="%s %s">\n' "$(_d "포트" "Port")" "$(html_escape "$_spf")"
+        printf '            <form method="post" action="/workspace-service-stop"><input type="hidden" name="path" value="%s" /><input type="hidden" name="port" value="%s" />' "$(html_escape "$ws")" "$(html_escape "$_spf")"
+        printf '<button type="submit" class="btn btn-secondary btn-small">%s %s</button></form>\n' "$(_d "포트 끄기" "Stop")" "$(html_escape "$_spf")"
+        printf '            <form method="post" action="/workspace-service-open"><input type="hidden" name="path" value="%s" /><input type="hidden" name="port" value="%s" />' "$(html_escape "$ws")" "$(html_escape "$_spf")"
+        printf '<button type="submit" class="btn btn-secondary btn-small"%s%s>%s %s</button></form>\n' "$open_disabled" "$open_title" "$(_d "열기" "Open")" "$(html_escape "$_spf")"
+        printf '            <form method="post" action="/workspace-service-open"><input type="hidden" name="path" value="%s" /><input type="hidden" name="network" value="1" /><input type="hidden" name="port" value="%s" />' "$(html_escape "$ws")" "$(html_escape "$_spf")"
+        printf '<button type="submit" class="btn btn-secondary btn-small"%s%s>%s %s</button></form>\n' "$open_disabled" "$open_title" "$(_d "LAN 열기" "Open on LAN")" "$(html_escape "$_spf")"
+        printf '          </span>\n'
+      done
     fi
     printf '        </div>\n'
     if [[ -n "$svc_shell" ]]; then
@@ -2253,8 +2258,9 @@ dashboard_emit_html_template() {
   .ws-svc-note { font-size:10px; color:var(--muted); font-weight:400; margin-left:4px; }
   .ws-svc-cmd { font-size:11px; color:var(--muted); margin-bottom:6px; line-height:1.4; word-break:break-word; }
   .ws-svc-exec-path { font-size:10px; color:var(--muted); margin-bottom:10px; line-height:1.35; word-break:break-all; }
-  .ws-svc-actions { display:flex; flex-wrap:wrap; gap:8px; }
+  .ws-svc-actions { display:flex; flex-wrap:wrap; gap:8px; align-items:center; }
   .ws-svc-actions form { margin:0; }
+  .ws-svc-per-port { display:inline-flex; flex-wrap:wrap; gap:6px; align-items:center; padding:4px 6px; border-radius:8px; border:1px solid var(--border); margin:0 4px 4px 0; }
   .ws-svc-hint { font-size:11px; color:var(--muted); margin-bottom:10px; line-height:1.45; word-break:break-word; }
   .ws-svc .btn:disabled { opacity:0.45; cursor:not-allowed; }
   .repo-form { margin:0; }
@@ -3395,6 +3401,42 @@ from http.server import HTTPServer, BaseHTTPRequestHandler
 import shlex
 
 
+def _dash_server_binds_all_interfaces():
+    b = (os.environ.get("CURSOR_DASH_HOST") or "127.0.0.1").strip()
+    return b in ("0.0.0.0", "::")
+
+
+def _client_ip_trusted_without_origin(ip: str) -> bool:
+    """Origin/Referer 가 없을 때: localhost 또는(서버가 0.0.0.0 이면) 사설망 클라이언트만 POST 허용."""
+    if not ip:
+        return False
+    ip = ip.strip().lower()
+    if ip in ("127.0.0.1", "::1", "::ffff:127.0.0.1"):
+        return True
+    if not _dash_server_binds_all_interfaces():
+        return False
+    if ip.startswith("::ffff:"):
+        ip = ip[7:]
+    parts = ip.split(".")
+    if len(parts) != 4:
+        return False
+    try:
+        a, b, _, _ = (int(x) for x in parts)
+    except ValueError:
+        return False
+    if a == 10:
+        return True
+    if a == 172 and 16 <= b <= 31:
+        return True
+    if a == 192 and b == 168:
+        return True
+    if a == 127:
+        return True
+    if a == 169 and b == 254:
+        return True
+    return False
+
+
 def _coerce_port(pv):
     if pv is None or isinstance(pv, bool):
         return None
@@ -3493,6 +3535,62 @@ def _workspace_service_read(path_abs):
     eff = _effective_shell_from_obj(last)
     po = _port_from_obj(last)
     return (eff, po)
+
+
+def _bash_invocation_script_path(sh_cmd):
+    """'bash /abs/script' 한 줄이면 그 스크립트 실경로, 아니면 None."""
+    s = (sh_cmd or "").strip()
+    if not s.startswith("bash "):
+        return None
+    rest = s[5:].strip()
+    try:
+        parts = shlex.split(rest)
+    except ValueError:
+        return None
+    if not parts:
+        return None
+    cand = parts[0]
+    if cand.startswith("-"):
+        cand = None
+        for p in parts[1:]:
+            if not p.startswith("-"):
+                cand = p
+                break
+        if not cand:
+            return None
+    exp = os.path.expanduser(cand)
+    if not exp.startswith("/"):
+        return None
+    ep = os.path.realpath(exp)
+    if os.path.isfile(ep):
+        return ep
+    return None
+
+
+def _path_is_cursor_setup_entrypoint(path):
+    """workspace-services 의 exec 가 CursorMobileS setup(또는 스태시 복사본)인지."""
+    path = os.path.realpath(path)
+    base = os.path.basename(path).lower()
+    if base == "setup":
+        return True
+    stash_dir = os.path.realpath(
+        str(pathlib.Path.home() / ".cursor-setup" / "workspace-exec-stash")
+    )
+    if path.startswith(stash_dir + os.sep) and ("setup" in base or base.endswith("_setup")):
+        return True
+    return False
+
+
+def _workspace_setup_script_path(ws_rp):
+    """프로젝트 루트의 ./setup 또는 대시보드가 쓰는 CURSOR_SETUP_SCRIPT."""
+    ws_rp = os.path.realpath(ws_rp)
+    cand = os.path.join(ws_rp, "setup")
+    if os.path.isfile(cand):
+        return cand
+    envp = (os.environ.get("CURSOR_SETUP_SCRIPT") or "").strip()
+    if envp and os.path.isfile(envp):
+        return os.path.realpath(envp)
+    return None
 
 
 def _lan_ipv4():
@@ -3666,6 +3764,19 @@ def _safe_filename(name):
 
 
 def _stash_exec_file(ws_real, filename, raw):
+    ws_path = pathlib.Path(ws_real).resolve()
+    try:
+        cand = ws_path / pathlib.Path(filename).name
+        if cand.is_file() and cand.read_bytes() == raw:
+            try:
+                suf = cand.suffix.lower()
+                if suf in (".command", ".sh", ".tool") or cand.name.endswith(".command"):
+                    os.chmod(cand, 0o755)
+            except OSError:
+                pass
+            return str(cand.resolve())
+    except OSError:
+        pass
     stash = pathlib.Path.home() / ".cursor-setup" / "workspace-exec-stash"
     stash.mkdir(parents=True, exist_ok=True)
     base = _safe_filename(filename)
@@ -3898,13 +4009,13 @@ class H(BaseHTTPRequestHandler):
             src = (p.netloc or "").strip().lower()
             if src and src == host:
                 return True
-        # 일부 클라이언트는 Origin/Referer 를 보내지 않으므로 루프백 클라이언트만 허용
+        # 일부 클라이언트(특히 모바일)는 Origin/Referer 를 안 보냄. LAN 바인딩(0.0.0.0)일 때는 사설망 IP 도 허용.
         ra = ""
         try:
             ra = (self.client_address[0] or "").strip().lower()
         except Exception:
             pass
-        return ra in ("127.0.0.1", "::1", "::ffff:127.0.0.1")
+        return _client_ip_trusted_without_origin(ra)
 
     def _html_ok(self):
         b = (
@@ -4145,12 +4256,30 @@ class H(BaseHTTPRequestHandler):
                     ).encode("utf-8")
                 )
                 return
-            # dev server 가 LAN(동일 네트워크)에서도 접근 가능하도록 host 관련 env를 기본 주입
-            inner = (
-                "cd {} && "
-                "export HOST=0.0.0.0 VITE_HOST=0.0.0.0 BIND=0.0.0.0 BIND_ADDR=0.0.0.0 "
-                "npm_config_host=0.0.0.0 && {}"
-            ).format(shlex.quote(rp), sh)
+            # exec 가 setup(또는 스태시 복사본)만 가리키면 인자 없이 또 HTTP 대시보드를 띄워 포트가 충돌함 → 터미널 --workspace 만 연다.
+            invoked = _bash_invocation_script_path(sh)
+            if invoked and _path_is_cursor_setup_entrypoint(invoked):
+                real_setup = _workspace_setup_script_path(rp)
+                if real_setup:
+                    sh = "bash " + shlex.quote(real_setup) + " --workspace " + shlex.quote(rp)
+                    inner = "cd {} && export CURSOR_SETUP_ROOT={} && {}".format(
+                        shlex.quote(rp),
+                        shlex.quote(rp),
+                        sh,
+                    )
+                else:
+                    inner = (
+                        "cd {} && "
+                        "export CURSOR_SETUP_ROOT={} HOST=0.0.0.0 VITE_HOST=0.0.0.0 BIND=0.0.0.0 BIND_ADDR=0.0.0.0 "
+                        "npm_config_host=0.0.0.0 && {}"
+                    ).format(shlex.quote(rp), shlex.quote(rp), sh)
+            else:
+                # dev server 가 LAN(동일 네트워크)에서도 접근 가능하도록 host 관련 env를 기본 주입
+                inner = (
+                    "cd {} && "
+                    "export CURSOR_SETUP_ROOT={} HOST=0.0.0.0 VITE_HOST=0.0.0.0 BIND=0.0.0.0 BIND_ADDR=0.0.0.0 "
+                    "npm_config_host=0.0.0.0 && {}"
+                ).format(shlex.quote(rp), shlex.quote(rp), sh)
             self._run_term(inner, auto_close=False)
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
@@ -4467,7 +4596,11 @@ class H(BaseHTTPRequestHandler):
             self.send_header("Content-Type", "text/html; charset=utf-8")
             self.end_headers()
             self.wfile.write(self._html_ok())
-            subprocess.Popen(["open", setup], env=os.environ, close_fds=True)
+            inner = "cd {} && /bin/bash {} --full-wizard".format(
+                shlex.quote(root),
+                shlex.quote(setup),
+            )
+            self._run_term(inner, auto_close=False)
             return
         if p == "/workspace-add-folder":
             ck = (self.headers.get("Cookie", "") or "").replace(" ", "")
@@ -4618,6 +4751,10 @@ dashboard_server_main_blocking() {
     log_err "대시보드 서버에 python3 가 필요합니다."
     return 1
   fi
+  # ~/.cursor-setup/dashboard-bind-lan 파일이 있으면 매번 LAN 바인딩(0.0.0.0) — CURSOR_DASH_HOST 가 없을 때만
+  if [[ -z "${CURSOR_DASH_HOST:-}" && "${CURSOR_DASH_LAN:-0}" != "1" && -f "${HOME}/.cursor-setup/dashboard-bind-lan" ]]; then
+    CURSOR_DASH_LAN=1
+  fi
   preferred="${CURSOR_DASH_PORT:-58741}"
   if [[ -n "${CURSOR_DASH_HOST:-}" ]]; then
     bind_host="$CURSOR_DASH_HOST"
@@ -4632,6 +4769,7 @@ dashboard_server_main_blocking() {
   else
     port="$(python3 -c "import socket; s=socket.socket(); s.bind(('$bind_host',0)); print(s.getsockname()[1]); s.close()")"
     log_info "포트 ${preferred} 을(를) 비울 수 없어 임시 포트 ${port} 로 뜹니다."
+    log_info "접속 주소는 아래 http://…:${port}/ 만 쓰면 됩니다. ${preferred} 는 이전 대시보드 등이 붙잡고 있을 수 있습니다."
   fi
   html="$(mktemp).html"
   allow="$(mktemp)"
@@ -4640,6 +4778,9 @@ dashboard_server_main_blocking() {
   local setup_cmd="$root/setup"
   [[ -f "$setup_cmd" ]] || setup_cmd="$root/MacMini-Cursor-Setup.command"
   export CURSOR_SETUP_EXEC_HINT="$setup_cmd"
+  # HTML 생성 시 사이드바에 LAN 링크·바인드 정보를 쓰려면 이 시점에 포트·호스트가 있어야 함
+  export CURSOR_DASH_PORT="$port"
+  export CURSOR_DASH_HOST="$bind_host"
   "$setup_cmd" --_cursor-setup-write-dash "$html" || {
     log_err "대시보드 HTML 생성 실패"
     rm -f "$allow" "$py"
@@ -4648,8 +4789,6 @@ dashboard_server_main_blocking() {
   _dashboard_server_write_py "$py"
   chmod +x "$py" 2>/dev/null || true
 
-  export CURSOR_DASH_PORT="$port"
-  export CURSOR_DASH_HOST="$bind_host"
   export CURSOR_DASH_HTML="$html"
   export CURSOR_DASH_ALLOWLIST="$allow"
   export CURSOR_SETUP_SCRIPT="$setup_cmd"
@@ -5358,6 +5497,8 @@ cloudflare_tunnel_main() {
   fi
 
   log_info "【이번에 새로 적용할 내용】 Cloudflare 계정 로그인 후, 터널을 만들고 ‘바깥 주소 → 맥 포트’ 한 줄을 씁니다."
+  log_warn "Tunnel ingress 의 service 는 항상 http://127.0.0.1:<포트> 만 씁니다. 공인 IP(예: 218.x)나 Zero Trust「Published application」에 공인 IP:포트를 넣는 방식은 이 흐름과 다르며, 맥 방화벽·공유기 없이는 외부에서 안 열립니다."
+  log_warn "~/.cloudflared/*.json 과 config.yml 은 GitHub 에 올리지 마세요. (레포의 ./scripts/git-safe-verify.sh 로 추적 여부를 검사할 수 있습니다.)"
 
   if cloudflared_cert_ok; then
     log_info "Cloudflare: cert 있음 → login 생략"

@@ -2,10 +2,22 @@
 *.env
 .env
 .env.*
+.envrc
 
-# cloudflared (레포에 절대 커밋하지 말 것)
+# 키·인증 실물 파일
+*.pem
+*.p12
+*.key
+
+# cloudflared (레포에 절대 커밋하지 말 것 — 실제 경로는 ~/.cloudflared/)
 cloudflared-credentials.json
 **/credentials.json
+.cloudflared/
+secrets/
+.private/
+
+# 로컬 전용 설정(경로·도메인이 들어갈 수 있음)
+workspace-services.jsonl
 
 # macOS
 .DS_Store

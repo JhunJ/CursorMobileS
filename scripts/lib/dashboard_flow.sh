@@ -40,6 +40,42 @@ from http.server import HTTPServer, BaseHTTPRequestHandler
 import shlex
 
 
+def _dash_server_binds_all_interfaces():
+    b = (os.environ.get("CURSOR_DASH_HOST") or "127.0.0.1").strip()
+    return b in ("0.0.0.0", "::")
+
+
+def _client_ip_trusted_without_origin(ip: str) -> bool:
+    """Origin/Referer 가 없을 때: localhost 또는(서버가 0.0.0.0 이면) 사설망 클라이언트만 POST 허용."""
+    if not ip:
+        return False
+    ip = ip.strip().lower()
+    if ip in ("127.0.0.1", "::1", "::ffff:127.0.0.1"):
+        return True
+    if not _dash_server_binds_all_interfaces():
+        return False
+    if ip.startswith("::ffff:"):
+        ip = ip[7:]
+    parts = ip.split(".")
+    if len(parts) != 4:
+        return False
+    try:
+        a, b, _, _ = (int(x) for x in parts)
+    except ValueError:
+        return False
+    if a == 10:
+        return True
+    if a == 172 and 16 <= b <= 31:
+        return True
+    if a == 192 and b == 168:
+        return True
+    if a == 127:
+        return True
+    if a == 169 and b == 254:
+        return True
+    return False
+
+
 def _coerce_port(pv):
     if pv is None or isinstance(pv, bool):
         return None
@@ -138,6 +174,62 @@ def _workspace_service_read(path_abs):
     eff = _effective_shell_from_obj(last)
     po = _port_from_obj(last)
     return (eff, po)
+
+
+def _bash_invocation_script_path(sh_cmd):
+    """'bash /abs/script' 한 줄이면 그 스크립트 실경로, 아니면 None."""
+    s = (sh_cmd or "").strip()
+    if not s.startswith("bash "):
+        return None
+    rest = s[5:].strip()
+    try:
+        parts = shlex.split(rest)
+    except ValueError:
+        return None
+    if not parts:
+        return None
+    cand = parts[0]
+    if cand.startswith("-"):
+        cand = None
+        for p in parts[1:]:
+            if not p.startswith("-"):
+                cand = p
+                break
+        if not cand:
+            return None
+    exp = os.path.expanduser(cand)
+    if not exp.startswith("/"):
+        return None
+    ep = os.path.realpath(exp)
+    if os.path.isfile(ep):
+        return ep
+    return None
+
+
+def _path_is_cursor_setup_entrypoint(path):
+    """workspace-services 의 exec 가 CursorMobileS setup(또는 스태시 복사본)인지."""
+    path = os.path.realpath(path)
+    base = os.path.basename(path).lower()
+    if base == "setup":
+        return True
+    stash_dir = os.path.realpath(
+        str(pathlib.Path.home() / ".cursor-setup" / "workspace-exec-stash")
+    )
+    if path.startswith(stash_dir + os.sep) and ("setup" in base or base.endswith("_setup")):
+        return True
+    return False
+
+
+def _workspace_setup_script_path(ws_rp):
+    """프로젝트 루트의 ./setup 또는 대시보드가 쓰는 CURSOR_SETUP_SCRIPT."""
+    ws_rp = os.path.realpath(ws_rp)
+    cand = os.path.join(ws_rp, "setup")
+    if os.path.isfile(cand):
+        return cand
+    envp = (os.environ.get("CURSOR_SETUP_SCRIPT") or "").strip()
+    if envp and os.path.isfile(envp):
+        return os.path.realpath(envp)
+    return None
 
 
 def _lan_ipv4():
@@ -311,6 +403,19 @@ def _safe_filename(name):
 
 
 def _stash_exec_file(ws_real, filename, raw):
+    ws_path = pathlib.Path(ws_real).resolve()
+    try:
+        cand = ws_path / pathlib.Path(filename).name
+        if cand.is_file() and cand.read_bytes() == raw:
+            try:
+                suf = cand.suffix.lower()
+                if suf in (".command", ".sh", ".tool") or cand.name.endswith(".command"):
+                    os.chmod(cand, 0o755)
+            except OSError:
+                pass
+            return str(cand.resolve())
+    except OSError:
+        pass
     stash = pathlib.Path.home() / ".cursor-setup" / "workspace-exec-stash"
     stash.mkdir(parents=True, exist_ok=True)
     base = _safe_filename(filename)
@@ -543,13 +648,13 @@ class H(BaseHTTPRequestHandler):
             src = (p.netloc or "").strip().lower()
             if src and src == host:
                 return True
-        # 일부 클라이언트는 Origin/Referer 를 보내지 않으므로 루프백 클라이언트만 허용
+        # 일부 클라이언트(특히 모바일)는 Origin/Referer 를 안 보냄. LAN 바인딩(0.0.0.0)일 때는 사설망 IP 도 허용.
         ra = ""
         try:
             ra = (self.client_address[0] or "").strip().lower()
         except Exception:
             pass
-        return ra in ("127.0.0.1", "::1", "::ffff:127.0.0.1")
+        return _client_ip_trusted_without_origin(ra)
 
     def _html_ok(self):
         b = (
@@ -790,12 +895,30 @@ class H(BaseHTTPRequestHandler):
                     ).encode("utf-8")
                 )
                 return
-            # dev server 가 LAN(동일 네트워크)에서도 접근 가능하도록 host 관련 env를 기본 주입
-            inner = (
-                "cd {} && "
-                "export HOST=0.0.0.0 VITE_HOST=0.0.0.0 BIND=0.0.0.0 BIND_ADDR=0.0.0.0 "
-                "npm_config_host=0.0.0.0 && {}"
-            ).format(shlex.quote(rp), sh)
+            # exec 가 setup(또는 스태시 복사본)만 가리키면 인자 없이 또 HTTP 대시보드를 띄워 포트가 충돌함 → 터미널 --workspace 만 연다.
+            invoked = _bash_invocation_script_path(sh)
+            if invoked and _path_is_cursor_setup_entrypoint(invoked):
+                real_setup = _workspace_setup_script_path(rp)
+                if real_setup:
+                    sh = "bash " + shlex.quote(real_setup) + " --workspace " + shlex.quote(rp)
+                    inner = "cd {} && export CURSOR_SETUP_ROOT={} && {}".format(
+                        shlex.quote(rp),
+                        shlex.quote(rp),
+                        sh,
+                    )
+                else:
+                    inner = (
+                        "cd {} && "
+                        "export CURSOR_SETUP_ROOT={} HOST=0.0.0.0 VITE_HOST=0.0.0.0 BIND=0.0.0.0 BIND_ADDR=0.0.0.0 "
+                        "npm_config_host=0.0.0.0 && {}"
+                    ).format(shlex.quote(rp), shlex.quote(rp), sh)
+            else:
+                # dev server 가 LAN(동일 네트워크)에서도 접근 가능하도록 host 관련 env를 기본 주입
+                inner = (
+                    "cd {} && "
+                    "export CURSOR_SETUP_ROOT={} HOST=0.0.0.0 VITE_HOST=0.0.0.0 BIND=0.0.0.0 BIND_ADDR=0.0.0.0 "
+                    "npm_config_host=0.0.0.0 && {}"
+                ).format(shlex.quote(rp), shlex.quote(rp), sh)
             self._run_term(inner, auto_close=False)
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
@@ -1112,7 +1235,11 @@ class H(BaseHTTPRequestHandler):
             self.send_header("Content-Type", "text/html; charset=utf-8")
             self.end_headers()
             self.wfile.write(self._html_ok())
-            subprocess.Popen(["open", setup], env=os.environ, close_fds=True)
+            inner = "cd {} && /bin/bash {} --full-wizard".format(
+                shlex.quote(root),
+                shlex.quote(setup),
+            )
+            self._run_term(inner, auto_close=False)
             return
         if p == "/workspace-add-folder":
             ck = (self.headers.get("Cookie", "") or "").replace(" ", "")
@@ -1263,6 +1390,10 @@ dashboard_server_main_blocking() {
     log_err "대시보드 서버에 python3 가 필요합니다."
     return 1
   fi
+  # ~/.cursor-setup/dashboard-bind-lan 파일이 있으면 매번 LAN 바인딩(0.0.0.0) — CURSOR_DASH_HOST 가 없을 때만
+  if [[ -z "${CURSOR_DASH_HOST:-}" && "${CURSOR_DASH_LAN:-0}" != "1" && -f "${HOME}/.cursor-setup/dashboard-bind-lan" ]]; then
+    CURSOR_DASH_LAN=1
+  fi
   preferred="${CURSOR_DASH_PORT:-58741}"
   if [[ -n "${CURSOR_DASH_HOST:-}" ]]; then
     bind_host="$CURSOR_DASH_HOST"
@@ -1277,6 +1408,7 @@ dashboard_server_main_blocking() {
   else
     port="$(python3 -c "import socket; s=socket.socket(); s.bind(('$bind_host',0)); print(s.getsockname()[1]); s.close()")"
     log_info "포트 ${preferred} 을(를) 비울 수 없어 임시 포트 ${port} 로 뜹니다."
+    log_info "접속 주소는 아래 http://…:${port}/ 만 쓰면 됩니다. ${preferred} 는 이전 대시보드 등이 붙잡고 있을 수 있습니다."
   fi
   html="$(mktemp).html"
   allow="$(mktemp)"
@@ -1285,6 +1417,9 @@ dashboard_server_main_blocking() {
   local setup_cmd="$root/setup"
   [[ -f "$setup_cmd" ]] || setup_cmd="$root/MacMini-Cursor-Setup.command"
   export CURSOR_SETUP_EXEC_HINT="$setup_cmd"
+  # HTML 생성 시 사이드바에 LAN 링크·바인드 정보를 쓰려면 이 시점에 포트·호스트가 있어야 함
+  export CURSOR_DASH_PORT="$port"
+  export CURSOR_DASH_HOST="$bind_host"
   "$setup_cmd" --_cursor-setup-write-dash "$html" || {
     log_err "대시보드 HTML 생성 실패"
     rm -f "$allow" "$py"
@@ -1293,8 +1428,6 @@ dashboard_server_main_blocking() {
   _dashboard_server_write_py "$py"
   chmod +x "$py" 2>/dev/null || true
 
-  export CURSOR_DASH_PORT="$port"
-  export CURSOR_DASH_HOST="$bind_host"
   export CURSOR_DASH_HTML="$html"
   export CURSOR_DASH_ALLOWLIST="$allow"
   export CURSOR_SETUP_SCRIPT="$setup_cmd"

@@ -2,6 +2,16 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")" && pwd)"
+# 스태시 복사본(~/.cursor-setup/workspace-exec-stash/…)은 dirname 이 레포가 아니다.
+# 대시보드가 export CURSOR_SETUP_ROOT=… 로 넘기므로, 아래에서 덮어쓰기 전에 힌트를 잡아 둔다.
+_setup_root_hint="${CURSOR_SETUP_ROOT:-}"
+if [[ ! -r "$ROOT/scripts/lib/common.sh" ]]; then
+  if [[ -n "$_setup_root_hint" && -r "${_setup_root_hint}/scripts/lib/common.sh" ]]; then
+    ROOT="$(cd "${_setup_root_hint}" && pwd -P)"
+  elif [[ -r "$PWD/scripts/lib/common.sh" ]]; then
+    ROOT="$(cd "$PWD" && pwd -P)"
+  fi
+fi
 export CURSOR_SETUP_ROOT="$ROOT"
 
 # 대시보드 서버: 폴더 허용 목록만 갱신 (POST /configure 직전에 호출)

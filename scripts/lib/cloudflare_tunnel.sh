@@ -116,6 +116,8 @@ cloudflare_tunnel_main() {
   fi
 
   log_info "【이번에 새로 적용할 내용】 Cloudflare 계정 로그인 후, 터널을 만들고 ‘바깥 주소 → 맥 포트’ 한 줄을 씁니다."
+  log_warn "Tunnel ingress 의 service 는 항상 http://127.0.0.1:<포트> 만 씁니다. 공인 IP(예: 218.x)나 Zero Trust「Published application」에 공인 IP:포트를 넣는 방식은 이 흐름과 다르며, 맥 방화벽·공유기 없이는 외부에서 안 열립니다."
+  log_warn "~/.cloudflared/*.json 과 config.yml 은 GitHub 에 올리지 마세요. (레포의 ./scripts/git-safe-verify.sh 로 추적 여부를 검사할 수 있습니다.)"
 
   if cloudflared_cert_ok; then
     log_info "Cloudflare: cert 있음 → login 생략"

@@ -13,9 +13,10 @@ Security-sensitive areas include:
 ## Secure Defaults
 
 - Dashboard bind host defaults to `127.0.0.1`.
-- LAN exposure requires explicit opt-in (`CURSOR_DASH_LAN=1` or custom `CURSOR_DASH_HOST`).
-- Dashboard POST actions require same-origin checks.
+- LAN exposure requires explicit opt-in (`CURSOR_DASH_LAN=1`, `CURSOR_DASH_HOST=0.0.0.0`, or create an empty `~/.cursor-setup/dashboard-bind-lan` so every `./setup` binds on all interfaces).
+- When bound to all interfaces, POST requests without `Origin`/`Referer` are allowed only from loopback or typical private LAN ranges (RFC1918 / link-local); same-origin rules still apply when those headers are present.
 - HTTP responses include defensive browser headers (CSP, frame deny, nosniff).
+- Cloudflare Tunnel configs written by this project use **`http://127.0.0.1:<port>`** for ingress `service:` — not the machine’s public IP. Credentials stay under **`~/.cloudflared/`** and must not be committed (see `.gitignore` and `./scripts/git-safe-verify.sh`).
 
 ## Reporting a Vulnerability
 

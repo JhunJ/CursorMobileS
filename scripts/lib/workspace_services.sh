@@ -656,24 +656,8 @@ for pid, ports in pid_to_ports.items():
             for pt in ports:
                 result[ws0].append(pt)
             continue
-# 대시보드 내장 Python 서버: cwd 가 홈·tmp 스크립트라 폴더 매칭이 안 됨 → CURSOR_SETUP_ROOT 에 포트 부여
-_dash_p = os.environ.get("CURSOR_DASH_PORT", "").strip()
-_dash_r = os.environ.get("CURSOR_SETUP_ROOT", "").strip()
-if _dash_p.isdigit() and _dash_r:
-    try:
-        _drp = os.path.realpath(os.path.expanduser(_dash_r))
-    except OSError:
-        _drp = None
-    if _drp and _drp in result:
-        _dpi = int(_dash_p)
-        if _dpi not in result[_drp]:
-            for _pid, _pts in pid_to_ports.items():
-                if _dpi not in _pts:
-                    continue
-                _c = cmd_by_pid.get(_pid) or ""
-                if "Python" in _c or "python" in _c.lower():
-                    result[_drp].append(_dpi)
-                break
+# 대시보드 HTTP 포트는 프로젝트 dev 서버와 별개이므로 워크스페이스 LISTEN 목록에 넣지 않는다
+# (넣으면 '실행 중'에 대시보드 포트가 같이 뜨고, 포트 끄기로 대시보드까지 죽일 위험이 있음)
 for ws in paths:
     result[ws] = sorted(set(result[ws]))
 outp = os.environ.get("LISTEN_JSON_OUT", "")

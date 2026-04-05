@@ -13,6 +13,16 @@ html_escape() {
   printf '%s' "${1:-}" | sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g' -e 's/"/\&quot;/g'
 }
 
+# macOS: 사이드바 LAN 주소 표시용 (en0 → en1 → en2)
+dashboard_primary_ipv4() {
+  local ifn ip
+  for ifn in en0 en1 en2; do
+    ip="$(ipconfig getifaddr "$ifn" 2>/dev/null)" || true
+    [[ -n "$ip" ]] && printf '%s' "$ip" && return
+  done
+  printf ''
+}
+
 _dashboard_card() {
   local dot_class="$1"
   local title="$2"
@@ -253,6 +263,15 @@ _dashboard_sidebar_locale_body_html() {
     printf '        <div class="step-label"><span class="step-num">%s</span>%s</div>\n' "$_sn" "$(_d "이 대시보드" "This dashboard")"
     printf '        <p class="step-desc">%s</p>\n' "$(_d "같은 주소로 다시 열 수 있습니다. 끝나면 서버를 꺼도 됩니다." "You can reopen this address anytime. Stop the server when you are done.")"
     printf '        <p style="margin:0 0 8px;font-size:12px"><a class="side-dash-url mono" href="http://127.0.0.1:%s/">127.0.0.1:%s</a></p>\n' "$(html_escape "$dash_port")" "$(html_escape "$dash_port")"
+    if [[ "${CURSOR_DASH_HOST:-127.0.0.1}" == "0.0.0.0" || "${CURSOR_DASH_HOST:-}" == "::" ]]; then
+      local _lip
+      _lip="$(dashboard_primary_ipv4)"
+      if [[ -n "$_lip" ]]; then
+        printf '        <p style="margin:0 0 8px;font-size:12px"><a class="side-dash-url mono" href="http://%s:%s/">%s:%s</a> <span class="small">%s</span></p>\n' \
+          "$(html_escape "$_lip")" "$(html_escape "$dash_port")" "$(html_escape "$_lip")" "$(html_escape "$dash_port")" \
+          "$(_d "(LAN · 이 맥 IPv4)" "(LAN · this Mac IPv4)")"
+      fi
+    fi
     printf '        <form method="post" action="/dashboard-stop" class="choice-form"><button type="submit" class="btn-choice"><span class="btn-choice-main"><span>%s</span><span class="btn-choice-sub">%s</span></span><span class="chev">›</span></button></form>\n' "$(_d "대시보드 서버 끄기" "Stop dashboard server")" ""
     printf '      </div>\n'
   fi
@@ -409,6 +428,7 @@ dashboard_workspace_rows_html_interactive() {
     local svc_shell svc_port svc_on svc_disp svc_exec_path disabled_attr stop_disabled stop_title _wsvc_json port_inp_extra
     local auto_csv primary_auto stop_port running_ports_label open_disabled open_title
     local cf_show_ports _rest _tp _hn _anyh _pp _cf_hn_list _cf_ing_ports
+    local stop_forms_ports _spf_rest _spf
     svc_shell=""
     svc_port=""
     svc_disp=""
@@ -572,32 +592,33 @@ print('svc_exec_path=' + shlex.quote(d.get('exec') or ''))
       disabled_attr=" disabled title=\"$(_d "이미 이 포트에서 실행 중" "Already running on this port")\""
     fi
     printf '          <form method="post" action="/workspace-service-start"><input type="hidden" name="path" value="%s" /><button type="submit" class="btn btn-secondary btn-small"%s>%s</button></form>\n' "$(html_escape "$ws")" "$disabled_attr" "$(_d "실행" "Start")"
-    stop_disabled=""
-    stop_title=""
-    if [[ -z "$stop_port" ]]; then
+    stop_forms_ports="${cf_show_ports}"
+    [[ -z "$stop_forms_ports" && -n "$stop_port" ]] && stop_forms_ports="$stop_port"
+    if [[ -z "$stop_forms_ports" ]]; then
       stop_disabled=" disabled"
       stop_title=" title=\"$(_d "포트 필요" "Port required")\""
-    fi
-    printf '          <form method="post" action="/workspace-service-stop"><input type="hidden" name="path" value="%s" />' "$(html_escape "$ws")"
-    [[ -n "$stop_port" ]] && printf '<input type="hidden" name="port" value="%s" />' "$(html_escape "$stop_port")"
-    if [[ -n "$stop_port" ]]; then
-      printf '<button type="submit" class="btn btn-secondary btn-small"%s%s>%s %s</button></form>\n' "$stop_disabled" "$stop_title" "$(_d "포트 끄기" "Stop")" "$(html_escape "$stop_port")"
-    else
+      printf '          <form method="post" action="/workspace-service-stop"><input type="hidden" name="path" value="%s" />' "$(html_escape "$ws")"
       printf '<button type="submit" class="btn btn-secondary btn-small"%s%s>%s</button></form>\n' "$stop_disabled" "$stop_title" "$(_d "포트 끄기" "Stop port")"
-    fi
-    printf '          <form method="post" action="/workspace-service-open"><input type="hidden" name="path" value="%s" />' "$(html_escape "$ws")"
-    [[ -n "$stop_port" ]] && printf '<input type="hidden" name="port" value="%s" />' "$(html_escape "$stop_port")"
-    if [[ -n "$stop_port" ]]; then
-      printf '<button type="submit" class="btn btn-secondary btn-small"%s%s>%s %s</button></form>\n' "$open_disabled" "$open_title" "$(_d "열기" "Open")" "$(html_escape "$stop_port")"
-    else
+      printf '          <form method="post" action="/workspace-service-open"><input type="hidden" name="path" value="%s" />' "$(html_escape "$ws")"
       printf '<button type="submit" class="btn btn-secondary btn-small"%s%s>%s</button></form>\n' "$open_disabled" "$open_title" "$(_d "열기" "Open")"
-    fi
-    printf '          <form method="post" action="/workspace-service-open"><input type="hidden" name="path" value="%s" /><input type="hidden" name="network" value="1" />' "$(html_escape "$ws")"
-    [[ -n "$stop_port" ]] && printf '<input type="hidden" name="port" value="%s" />' "$(html_escape "$stop_port")"
-    if [[ -n "$stop_port" ]]; then
+      printf '          <form method="post" action="/workspace-service-open"><input type="hidden" name="path" value="%s" /><input type="hidden" name="network" value="1" />' "$(html_escape "$ws")"
       printf '<button type="submit" class="btn btn-secondary btn-small"%s%s>%s</button></form>\n' "$open_disabled" "$open_title" "$(_d "LAN 열기" "Open on LAN")"
     else
-      printf '<button type="submit" class="btn btn-secondary btn-small"%s%s>%s</button></form>\n' "$open_disabled" "$open_title" "$(_d "LAN 열기" "Open on LAN")"
+      _spf_rest="${stop_forms_ports},"
+      while [[ -n "$_spf_rest" ]]; do
+        _spf="${_spf_rest%%,*}"
+        _spf_rest="${_spf_rest#*,}"
+        _spf="${_spf// /}"
+        [[ "$_spf" =~ ^[0-9]+$ ]] || continue
+        printf '          <span class="ws-svc-per-port" role="group" aria-label="%s %s">\n' "$(_d "포트" "Port")" "$(html_escape "$_spf")"
+        printf '            <form method="post" action="/workspace-service-stop"><input type="hidden" name="path" value="%s" /><input type="hidden" name="port" value="%s" />' "$(html_escape "$ws")" "$(html_escape "$_spf")"
+        printf '<button type="submit" class="btn btn-secondary btn-small">%s %s</button></form>\n' "$(_d "포트 끄기" "Stop")" "$(html_escape "$_spf")"
+        printf '            <form method="post" action="/workspace-service-open"><input type="hidden" name="path" value="%s" /><input type="hidden" name="port" value="%s" />' "$(html_escape "$ws")" "$(html_escape "$_spf")"
+        printf '<button type="submit" class="btn btn-secondary btn-small"%s%s>%s %s</button></form>\n' "$open_disabled" "$open_title" "$(_d "열기" "Open")" "$(html_escape "$_spf")"
+        printf '            <form method="post" action="/workspace-service-open"><input type="hidden" name="path" value="%s" /><input type="hidden" name="network" value="1" /><input type="hidden" name="port" value="%s" />' "$(html_escape "$ws")" "$(html_escape "$_spf")"
+        printf '<button type="submit" class="btn btn-secondary btn-small"%s%s>%s %s</button></form>\n' "$open_disabled" "$open_title" "$(_d "LAN 열기" "Open on LAN")" "$(html_escape "$_spf")"
+        printf '          </span>\n'
+      done
     fi
     printf '        </div>\n'
     if [[ -n "$svc_shell" ]]; then
@@ -803,8 +824,9 @@ dashboard_emit_html_template() {
   .ws-svc-note { font-size:10px; color:var(--muted); font-weight:400; margin-left:4px; }
   .ws-svc-cmd { font-size:11px; color:var(--muted); margin-bottom:6px; line-height:1.4; word-break:break-word; }
   .ws-svc-exec-path { font-size:10px; color:var(--muted); margin-bottom:10px; line-height:1.35; word-break:break-all; }
-  .ws-svc-actions { display:flex; flex-wrap:wrap; gap:8px; }
+  .ws-svc-actions { display:flex; flex-wrap:wrap; gap:8px; align-items:center; }
   .ws-svc-actions form { margin:0; }
+  .ws-svc-per-port { display:inline-flex; flex-wrap:wrap; gap:6px; align-items:center; padding:4px 6px; border-radius:8px; border:1px solid var(--border); margin:0 4px 4px 0; }
   .ws-svc-hint { font-size:11px; color:var(--muted); margin-bottom:10px; line-height:1.45; word-break:break-word; }
   .ws-svc .btn:disabled { opacity:0.45; cursor:not-allowed; }
   .repo-form { margin:0; }

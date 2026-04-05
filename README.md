@@ -362,6 +362,8 @@ Quick local validation:
 - To intentionally open it on LAN, use `CURSOR_DASH_LAN=1 ./setup` (or set `CURSOR_DASH_HOST=0.0.0.0`) on a trusted network only.
 - Dashboard POST actions apply a same-origin check and standard browser security headers (CSP / frame deny / nosniff).
 - **Secrets** (`cloudflared` credentials, env files) must stay out of git — see [`.gitignore`](.gitignore).
+- **Cloudflare Tunnel:** keep `~/.cloudflared/` only on your Mac. Ingress `service:` should be **`http://127.0.0.1:<port>`** — not your public WAN IP. The tunnel agent connects out to Cloudflare; visitors never need to reach `218.x.x.x:port` on your router.
+- Before `git push`, run **`./scripts/git-safe-verify.sh`** to catch tracked private keys, stray `.cloudflared/` copies, or YAML that points ingress at a public IPv4.
 - Scripts may run **`curl | bash`** for the official Cursor install script when you opt in — review [Cursor’s install documentation](https://cursor.com) if you need to comply with corporate policy.
 - **`gh`** and **Cloudflare** steps require you to authenticate with those providers; nothing in this repo replaces their OAuth or token flows.
 
