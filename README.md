@@ -7,47 +7,65 @@
 
 Turn a Mac (Mac mini on the desk, or any Mac you SSH into) into a repeatable “dev box” profile: install prerequisites, wire GitHub (`gh`), install the Cursor Agent CLI, register a LaunchAgent worker, and optionally expose services through Cloudflare — without memorizing a long checklist.
 
+### Why this feels good in practice
+
+- **Fast onboarding**: one `./setup`, then operate from the dashboard.
+- **Idempotent flow**: rerun safely; already-done steps are skipped.
+- **Per-workspace continuation**: fix only what is missing for that folder.
+- **Secure-by-default dashboard**: localhost bind (`127.0.0.1`) unless you explicitly enable LAN exposure.
+
 ---
 
 ## What it looks like (your browser, local only)
 
-These screenshots are **real captures** of the local dashboard (Chrome headless → PNG). Only **`127.0.0.1`** appears in the UI — no public/WAN IP. Nothing is hosted on GitHub; after `./setup`, the page is served from **your Mac** (port may differ from the examples below).
+This is the **most important screen** in the project: the local dashboard home page.  
+It is captured from a real run and always uses **`127.0.0.1`** in the address bar (no public/WAN IP).
 
-**Regenerate the images** (requires Google Chrome on macOS):
+![Dashboard — English overview](docs/screenshots/dashboard-en.png)
+
+### What to click first (exact order, 30-second guide)
+
+| Order | Click in the UI | Result |
+|------|------------------|--------|
+| **1** | **Add folder in Finder** (left sidebar, section 1) | Registers project root folders so they appear in the list. |
+| **2** | **Run setup script** (left sidebar, section 2) | Opens Terminal and runs setup for GitHub, Agent, and optional Tunnel steps. |
+| **3** | In a project row, use the setup/continue action | Applies missing setup for that specific workspace only. |
+| **4** | **Refresh** (bottom of main panel) | Re-checks status and updates running/port indicators. |
+| **5** | **Stop dashboard server** (left sidebar, section 3) | Stops the local dashboard server when you are done. |
+
+### Screen-by-screen sample flow
+
+1. **Screen A — Dashboard Home (entry screen)**  
+   You should see quick-check pills at the top and project rows below.
+2. **Screen B — Folder Registration**  
+   Use **Add folder in Finder** to include parent directories; then confirm projects appear in the list.
+3. **Screen C — Setup Execution**  
+   Use **Run setup script** to open Terminal and complete missing dependencies/config.
+4. **Screen D — Per-project Operations**  
+   In each project row, use row actions to continue setup, open dev URL, or inspect status.
+
+### Button map for the first page (fast orientation)
+
+- **Left sidebar / 1**: add workspace roots (`workspaces.txt` driven).  
+- **Left sidebar / 2**: run the full setup path (Tunnel, GitHub, Agent).  
+- **Top pills**: instant health snapshot (Tunnel, GitHub, Agent CLI, Worker).  
+- **Search box**: filter by project name or path.  
+- **Favorites & Other projects**: active workspaces and running ports.  
+- **Bottom Refresh**: rescan state without restarting the dashboard.
+
+### Korean UI sample (same layout)
+
+The dashboard supports **KO / EN** toggle with the same structure and workflow.
+
+![Dashboard — Korean overview](docs/screenshots/dashboard-ko.png)
+
+**Re-generate screenshots** (macOS + Google Chrome):
 
 ```bash
 ./scripts/capture-readme-screenshots.sh --auto-start
 ```
 
-Or run the same script while your dashboard is already up (`./setup` in another terminal); it will reuse `CURSOR_DASH_PORT`, then `58741`.
-
-### English (default) — overview
-
-Sidebar **Cursor Setup** (3 steps), quick-check pills, search, favorites / ports, refresh.
-
-![Dashboard — English overview](docs/screenshots/dashboard-en.png)
-
-### English — taller viewport (more of the project list)
-
-Same session, larger height so **Favorites** and **Other projects** are easier to see in the README.
-
-![Dashboard — English, extended height](docs/screenshots/dashboard-en-full.png)
-
-### Korean UI
-
-The dashboard supports **KO / EN** (toggle in the sidebar). Korean strings for the same layout:
-
-![Dashboard — Korean overview](docs/screenshots/dashboard-ko.png)
-
-### Run in this order (matches **Cursor Setup** in the sidebar)
-
-| Step | What to do | Why |
-|------|------------|-----|
-| **1 — Dev & project folders** | Click **Add folder in Finder** (or edit `~/.cursor-setup/workspaces.txt` manually: one folder path per line). | The dashboard only lists folders it is allowed to see. Without entries, you will not see your projects here. `~/Dev/*` and Git roots under `~/Dev` are also scanned automatically — see [Workspace discovery](#workspace-discovery). |
-| **2 — Tunnel, GitHub, Agent** | Click **Run setup script** (opens Terminal with this repo’s `setup`), or from any clone run `./setup --full-wizard` / pick a project and use **Continue setup** on a card. | This step installs or configures **Homebrew `gh`**, optional **Cloudflare Tunnel**, **Cursor Agent CLI**, and the **LaunchAgent worker** — only for what is still missing. |
-| **3 — This dashboard** | Keep the tab open while you work; use **Stop dashboard server** in the sidebar when you are finished. | The small Python server is what renders this UI. The URL (e.g. `127.0.0.1:58741`) is shown in the sidebar and was printed in Terminal when you started `./setup`. |
-
-**Shortest path to this screen:** clone the repo → `chmod +x setup && ./setup` → open the printed URL. Details: [Quick start](#quick-start).
+**Shortest path to this screen:** clone the repo → `chmod +x setup && ./setup` → open the printed URL.
 
 ```mermaid
 flowchart LR
@@ -78,6 +96,7 @@ flowchart LR
 - [Command-line usage](#command-line-usage)
 - [Environment variables](#environment-variables)
 - [Security & privacy](#security--privacy)
+- [Security policy](SECURITY.md)
 - [Requirements](#requirements)
 - [License](#license)
 
@@ -278,7 +297,8 @@ The dashboard can also help **register** entries; they are merged into this JSON
 | Variable | Purpose |
 |----------|---------|
 | `CURSOR_DASH_LANG` | `en` or `ko` — dashboard language (default **`en`**). |
-| `CURSOR_DASH_HOST` | Bind address for the HTTP server (default **`0.0.0.0`**). Use **`127.0.0.1`** if the dashboard must not be reachable from the LAN. |
+| `CURSOR_DASH_HOST` | Bind address for the HTTP server (default **`127.0.0.1`**). |
+| `CURSOR_DASH_LAN` | Set `1` to expose dashboard on LAN (`0.0.0.0`) when `CURSOR_DASH_HOST` is not set. |
 | `CURSOR_DASH_PORT` | Preferred port (default **`58741`** if free; otherwise an ephemeral port). |
 | `CURSOR_DASH_BRAND` | Custom title string in the dashboard header. |
 | `CURSOR_SETUP_DEFAULT_WORKSPACE` | Default folder for status and some flows. |
@@ -288,7 +308,9 @@ The dashboard can also help **register** entries; they are merged into this JSON
 
 ## Security & privacy
 
-- The dashboard server binds to **all interfaces** by default (`CURSOR_DASH_HOST` → `0.0.0.0`) so other devices on the **LAN** can open it if your firewall allows. Set **`CURSOR_DASH_HOST=127.0.0.1`** for localhost-only binding.
+- The dashboard server binds to **localhost by default** (`127.0.0.1`) to reduce accidental LAN exposure.
+- To intentionally open it on LAN, use `CURSOR_DASH_LAN=1 ./setup` (or set `CURSOR_DASH_HOST=0.0.0.0`) on a trusted network only.
+- Dashboard POST actions apply a same-origin check and standard browser security headers (CSP / frame deny / nosniff).
 - **Secrets** (`cloudflared` credentials, env files) must stay out of git — see [`.gitignore`](.gitignore).
 - Scripts may run **`curl | bash`** for the official Cursor install script when you opt in — review [Cursor’s install documentation](https://cursor.com) if you need to comply with corporate policy.
 - **`gh`** and **Cloudflare** steps require you to authenticate with those providers; nothing in this repo replaces their OAuth or token flows.
