@@ -32,13 +32,18 @@ gui_alert_info() {
 
 # 브라우저 HTML 대시보드 연 뒤, 짧은 버튼 창
 gui_show_startup_dashboard() {
-  local wd="${1:-$HOME/Dev/AutoCRF}"
+  local wd="${1:-}"
+  [[ -z "$wd" ]] && declare -F cursor_setup_default_workspace_dir >/dev/null 2>&1 && wd="$(cursor_setup_default_workspace_dir)"
+  [[ -z "$wd" ]] && wd="$HOME"
   if declare -F status_dashboard_open_html >/dev/null 2>&1; then
     status_dashboard_open_html >/dev/null 2>&1 || log_warn "HTML 대시보드를 열지 못했어요 (python3 확인)."
   fi
 
+  local gtitle="${CURSOR_DASH_BRAND:-Cursor 셋업}"
+  local gt_esc
+  gt_esc=$(printf '%s' "$gtitle" | sed 's/"/\\"/g')
   local out ec
-  out=$(osascript -e 'display dialog "브라우저에 상태 대시보드를 열었어요. (저장소마다 카드가 나뉩니다)" with title "맥미니 셋업" buttons {"종료", "터미널 로그", "설정"} default button "설정" with icon note' 2>/dev/null) || true
+  out=$(osascript -e "display dialog \"브라우저에 상태 대시보드를 열었어요. (저장소마다 카드가 나뉩니다)\" with title \"$gt_esc\" buttons {\"종료\", \"터미널 로그\", \"설정\"} default button \"설정\" with icon note" 2>/dev/null) || true
   ec=$?
   if [[ $ec -ne 0 ]] || [[ -z "$out" ]]; then
     printf '\n'
@@ -55,7 +60,10 @@ gui_pick_graphic_mode() {
   local b
   b=$(_gui_as_escape "$body")
   local out
-  out=$(osascript -e "display dialog \"$b\" with title \"맥미니 셋업\" buttons {\"글자만\", \"그림(창)\"} default button \"그림(창)\" with icon note" 2>/dev/null) || true
+  local gtitle="${CURSOR_DASH_BRAND:-Cursor 셋업}"
+  local gt_esc
+  gt_esc=$(printf '%s' "$gtitle" | sed 's/"/\\"/g')
+  out=$(osascript -e "display dialog \"$b\" with title \"$gt_esc\" buttons {\"글자만\", \"그림(창)\"} default button \"그림(창)\" with icon note" 2>/dev/null) || true
   case "$out" in
     *"그림"*) return 0 ;;
     *) return 1 ;;

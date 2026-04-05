@@ -59,14 +59,109 @@ cloudflare_config_ingress_pairs() {
   command_exists python3 || return 0
   CF_CFG="$cfg" python3 <<'PY'
 import os, re, pathlib
+
+def strip_inline_comment(s: str) -> str:
+    in_single = False
+    in_double = False
+    out = []
+    for ch in s:
+        if ch == "'" and not in_double:
+            in_single = not in_single
+            out.append(ch)
+            continue
+        if ch == '"' and not in_single:
+            in_double = not in_double
+            out.append(ch)
+            continue
+        if ch == "#" and not in_single and not in_double:
+            break
+        out.append(ch)
+    return "".join(out).strip()
+
+def clean_scalar(v: str) -> str:
+    v = strip_inline_comment(v).strip()
+    if len(v) >= 2 and ((v[0] == v[-1] == '"') or (v[0] == v[-1] == "'")):
+        v = v[1:-1].strip()
+    return v
+
+def add_kv(rule: dict, key: str, value: str) -> None:
+    key = (key or "").strip().lower()
+    if not key:
+        return
+    rule[key] = clean_scalar(value)
+
 p = pathlib.Path(os.environ["CF_CFG"])
 t = p.read_text(encoding="utf-8", errors="replace")
-for block in re.split(r"\n\s*-\s+", t):
-    hm = re.search(r"hostname:\s*(\S+)", block)
-    sv = re.search(r"service:\s*(\S+)", block)
-    if hm and sv and "http_status" not in sv.group(1):
-        print(hm.group(1) + "\t" + sv.group(1))
+lines = t.splitlines()
+in_ingress = False
+rules = []
+cur = None
+
+for raw in lines:
+    line = raw.rstrip()
+    stripped = line.strip()
+    if not in_ingress:
+        if re.match(r"^ingress\s*:\s*$", stripped):
+            in_ingress = True
+        continue
+    if not stripped:
+        continue
+    # ingress 섹션이 끝나면 중단 (다음 top-level key)
+    if not line.startswith((" ", "\t", "-")) and re.match(r"^[A-Za-z0-9_-]+\s*:", stripped):
+        break
+    m_item = re.match(r"^\s*-\s*(.*)$", line)
+    if m_item:
+        if cur:
+            rules.append(cur)
+        cur = {}
+        rest = m_item.group(1).strip()
+        if rest:
+            m_kv = re.match(r"^([A-Za-z0-9_-]+)\s*:\s*(.*)$", rest)
+            if m_kv:
+                add_kv(cur, m_kv.group(1), m_kv.group(2))
+        continue
+    if cur is None:
+        continue
+    m_kv = re.match(r"^\s+([A-Za-z0-9_-]+)\s*:\s*(.*)$", line)
+    if m_kv:
+        add_kv(cur, m_kv.group(1), m_kv.group(2))
+
+if cur:
+    rules.append(cur)
+
+for r in rules:
+    host = (r.get("hostname") or "").strip()
+    svc = (r.get("service") or "").strip()
+    if not host or not svc:
+        continue
+    if "http_status" in svc:
+        continue
+    print(f"{host}\t{svc}")
 PY
+}
+
+# ingress 의 service(예: http://127.0.0.1:3000)에서 로컬 포트 추출
+cloudflare_service_local_port() {
+  local svc="${1:-}"
+  [[ -n "$svc" ]] || return 1
+  printf '%s' "$svc" | sed -nE 's|.*:([0-9]+)([^0-9].*)?$|\1|p'
+}
+
+# stdout: 해당 포트로 연결된 hostname 한 줄씩 (중복 제거)
+cloudflare_hostnames_for_port() {
+  local want="${1:-}"
+  [[ "$want" =~ ^[0-9]+$ ]] || return 0
+  local h s lp seen=""
+  while IFS=$'\t' read -r h s || [[ -n "$h" ]]; do
+    [[ -z "$h" ]] && continue
+    lp="$(cloudflare_service_local_port "$s")"
+    [[ "$lp" == "$want" ]] || continue
+    case "$seen" in
+      *" ${h} "*) continue ;;
+    esac
+    printf '%s\n' "$h"
+    seen="${seen} ${h} "
+  done < <(cloudflare_config_ingress_pairs)
 }
 
 # cloudflared CLI 에 등록된 터널 (이름·ID 일부)
@@ -129,8 +224,7 @@ worker_status_detail_for_workspace() {
 
   if [[ -f "$plist" ]]; then
     pw=$(plutil_string "$plist" WorkingDirectory)
-    pw=$(realpath_dir "$pw")
-    if [[ "$pw" == "$ws_r" ]]; then
+    if dirs_same "$pw" "$ws"; then
       if launchagent_running "com.cursor.agent.worker" || cursor_worker_process_running; then
         printf '%s\n' "워커 · 이 폴더 · 실행 중"
       else
@@ -161,7 +255,8 @@ worker_status_detail_for_workspace() {
 
 # 대시보드 창용 짧은 글 (줄바꿈 포함)
 status_dashboard_compact_for_dialog() {
-  local w="${1:-$HOME/Dev/AutoCRF}"
+  local w="${1:-}"
+  [[ -z "$w" ]] && w="$(cursor_setup_default_workspace_dir)"
   w=$(expand_tilde "$w")
 
   local cf_ko gh_ko ag_ko wk_ko
@@ -228,7 +323,8 @@ status_dashboard_print() {
   local work_dir="${1:-}"
   local repo_hint="${2:-}"
 
-  local w="${work_dir:-$HOME/Dev/AutoCRF}"
+  local w="${work_dir:-}"
+  [[ -z "$w" ]] && w="$(cursor_setup_default_workspace_dir)"
   local uid
   uid=$(id -u)
 

@@ -1,0 +1,11 @@
+# 복사: cp workspace-services.jsonl.example ~/.cursor-setup/workspace-services.jsonl
+# 한 줄에 JSON 하나. path 는 워크스페이스 폴더의 실제 절대 경로.
+#
+# 대시보드 각 폴더 카드에서 Finder / 드래그 / 찾아보기로 등록해도 이 파일에 자동 반영됩니다.
+#
+# 보통은 프로젝트 안에 만든 실행 파일(.command, .sh 등)만 등록하면 됩니다:
+# {"path":"/Users/나/Dev/내앱","exec":"/Users/나/Dev/내앱/dev.command","port":5173}
+#
+# 실행 파일 대신 셸 한 줄을 쓰려면 shell:
+# {"path":"/Users/나/Dev/다른폴더","shell":"npm run dev","port":5173}
+# {"path":"/Users/나/Dev/정적서버","shell":"python3 -m http.server 8765","port":8765}

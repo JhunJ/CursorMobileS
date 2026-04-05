@@ -6,9 +6,10 @@
 	<string>com.cursor.agent.worker</string>
 	<key>ProgramArguments</key>
 	<array>
+		<string>/bin/bash</string>
+		<string>__WRAP_SCRIPT__</string>
+		<string>__WORK_DIR__</string>
 		<string>__AGENT_BIN__</string>
-		<string>worker</string>
-		<string>start</string>
 	</array>
 	<key>WorkingDirectory</key>
 	<string>__WORK_DIR__</string>

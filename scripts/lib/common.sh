@@ -25,6 +25,19 @@ fast_prompts_enabled() {
   [[ "${CURSOR_SETUP_FAST_PROMPTS:-0}" == "1" ]]
 }
 
+# 배포 시 개인 경로 대신: CURSOR_SETUP_DEFAULT_WORKSPACE, 브랜드는 CURSOR_DASH_BRAND
+cursor_setup_default_workspace_dir() {
+  if [[ -n "${CURSOR_SETUP_DEFAULT_WORKSPACE:-}" ]]; then
+    expand_tilde "${CURSOR_SETUP_DEFAULT_WORKSPACE}"
+    return 0
+  fi
+  if [[ -n "${CURSOR_SETUP_ROOT:-}" ]]; then
+    printf '%s\n' "$CURSOR_SETUP_ROOT"
+    return 0
+  fi
+  printf '%s\n' "$HOME"
+}
+
 # 기본값이 대문자면 그게 기본 (Y/n 또는 y/N)
 prompt_yn() {
   local msg="$1"
@@ -140,6 +153,27 @@ plutil_string() {
 
 realpath_dir() {
   cd "$1" 2>/dev/null && pwd -P || printf '%s\n' "$1"
+}
+
+# plist 의 WorkingDirectory(~ 포함)·다른 문자열 표기와 실제 폴더가 같으면 0
+dirs_same() {
+  local a="${1:-}" b="${2:-}"
+  [[ -z "$a" || -z "$b" ]] && return 1
+  a=$(expand_tilde "$a")
+  b=$(expand_tilde "$b")
+  local ra rb
+  ra=$(cd "$a" 2>/dev/null && pwd -P) || return 1
+  rb=$(cd "$b" 2>/dev/null && pwd -P) || return 1
+  [[ "$ra" == "$rb" ]] && return 0
+  if [[ "$(uname -s)" == "Darwin" ]]; then
+    local ia ib da db
+    ia=$(stat -f '%i' "$ra" 2>/dev/null) || return 1
+    ib=$(stat -f '%i' "$rb" 2>/dev/null) || return 1
+    da=$(stat -f '%d' "$ra" 2>/dev/null) || return 1
+    db=$(stat -f '%d' "$rb" 2>/dev/null) || return 1
+    [[ "$ia" == "$ib" && "$da" == "$db" ]] && return 0
+  fi
+  return 1
 }
 
 cursor_worker_process_running() {

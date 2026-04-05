@@ -1,9 +1,32 @@
 #!/usr/bin/env bash
-# 브라우저 대시보드(127.0.0.1) — 클릭 시 터미널에서 이어 실행
+# 브라우저 대시보드(기본 0.0.0.0 바인딩) — 클릭 시 터미널에서 이어 실행
 
 dashboard_write_allowlist_file() {
   local dest="$1"
   discover_workspace_paths > "$dest"
+}
+
+# 127.0.0.1:port LISTEN 프로세스 종료 (터미널만 닫고 남은 이전 대시보드 정리)
+dashboard_free_listen_port() {
+  local port="$1"
+  local pids pid
+  command_exists lsof || return 0
+  pids=$(lsof -nP -iTCP:"$port" -sTCP:LISTEN -t 2>/dev/null) || true
+  [[ -z "$pids" ]] && return 0
+  log_warn "포트 ${port} 사용 중 — 이전 프로세스를 종료합니다."
+  for pid in $(printf '%s\n' "$pids" | sort -u); do
+    [[ -z "$pid" ]] && continue
+    kill "$pid" 2>/dev/null || true
+  done
+  sleep 0.45
+  pids=$(lsof -nP -iTCP:"$port" -sTCP:LISTEN -t 2>/dev/null) || true
+  if [[ -n "$pids" ]]; then
+    for pid in $(printf '%s\n' "$pids" | sort -u); do
+      [[ -z "$pid" ]] && continue
+      kill -9 "$pid" 2>/dev/null || true
+    done
+    sleep 0.25
+  fi
 }
 
 # 임시 파일에 내장 Python 대시보드 서버 기록 후 경로 출력
@@ -12,15 +35,401 @@ _dashboard_server_write_py() {
   python3 <<'PY' > "$out"
 import textwrap, sys
 code = r'''
-import os, subprocess, urllib.parse
+import os, re, subprocess, sys, threading, time, urllib.parse, json, pathlib
 from http.server import HTTPServer, BaseHTTPRequestHandler
 import shlex
+
+
+def _coerce_port(pv):
+    if pv is None or isinstance(pv, bool):
+        return None
+    if isinstance(pv, (int, float)):
+        try:
+            n = int(pv)
+        except (TypeError, ValueError):
+            return None
+        if isinstance(pv, float) and float(pv) != float(int(pv)):
+            return None
+        return n if 1 <= n <= 65535 else None
+    s = str(pv).strip()
+    if not s:
+        return None
+    try:
+        n = int(float(s))
+    except (ValueError, OverflowError):
+        return None
+    return n if 1 <= n <= 65535 else None
+
+
+def _port_from_obj(o):
+    if not isinstance(o, dict):
+        return None
+    for key in ("port", "devPort", "listen", "listenPort"):
+        if key not in o:
+            continue
+        pn = _coerce_port(o.get(key))
+        if pn is not None:
+            return pn
+    return None
+
+
+def _effective_shell_from_obj(o):
+    sh = (o.get("shell") or "").strip().replace("\r", "").replace("\n", " ")
+    ex = (o.get("exec") or "").strip().replace("\r", "")
+    if ex:
+        ep = pathlib.Path(ex).expanduser()
+        try:
+            try:
+                ep = ep.resolve(strict=False)
+            except TypeError:
+                ep = ep.resolve()
+        except OSError:
+            try:
+                ep = pathlib.Path(os.path.realpath(ex))
+            except OSError:
+                ep = pathlib.Path(ex)
+        return "bash " + shlex.quote(str(ep))
+    return sh or None
+
+
+def _workspace_service_read(path_abs):
+    p = pathlib.Path(path_abs).resolve()
+    f = pathlib.Path.home() / ".cursor-setup" / "workspace-services.jsonl"
+    if not f.is_file():
+        return None, None
+    try:
+        text = f.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None, None
+
+    def _match(ap, target):
+        if ap == target:
+            return True
+        try:
+            if ap.exists() and target.exists() and os.path.samefile(ap, target):
+                return True
+        except OSError:
+            pass
+        return os.path.normcase(str(ap)) == os.path.normcase(str(target))
+
+    last = None
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        try:
+            o = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        rawp = (o.get("path") or "").replace("\r", "").strip()
+        ap = pathlib.Path(rawp).expanduser()
+        try:
+            try:
+                ap = ap.resolve(strict=False)
+            except TypeError:
+                ap = ap.resolve()
+        except OSError:
+            ap = pathlib.Path(os.path.realpath(str(rawp)))
+        if not _match(ap, p):
+            continue
+        last = o
+    if last is None:
+        return None, None
+    eff = _effective_shell_from_obj(last)
+    po = _port_from_obj(last)
+    return (eff, po)
+
+
+def _lan_ipv4():
+    # macOS 기준: 우선순위 인터페이스에서 LAN IPv4 탐색
+    for ifn in ("en0", "en1", "en2"):
+        try:
+            r = subprocess.run(
+                ["ipconfig", "getifaddr", ifn],
+                capture_output=True,
+                text=True,
+                timeout=2,
+            )
+        except Exception:
+            continue
+        ip = (r.stdout or "").strip()
+        if r.returncode == 0 and ip:
+            return ip
+    return None
+
+
+def _favorite_paths_filtered():
+    dest = pathlib.Path.home() / ".cursor-setup" / "dashboard-favorites.json"
+    raw = []
+    if dest.is_file():
+        try:
+            data = json.loads(dest.read_text(encoding="utf-8"))
+            if isinstance(data, list):
+                raw = [str(x).strip() for x in data if isinstance(x, str) and str(x).strip()]
+        except Exception:
+            pass
+    al = os.environ.get("CURSOR_DASH_ALLOWLIST", "")
+    allowed = set()
+    if al and os.path.isfile(al):
+        with open(al, encoding="utf-8", errors="replace") as fp:
+            for line in fp:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    allowed.add(os.path.realpath(line))
+                except OSError:
+                    continue
+    use_allowlist = len(allowed) > 0
+    out = []
+    for x in raw:
+        try:
+            rp = os.path.realpath(x)
+        except OSError:
+            continue
+        if use_allowlist:
+            if rp in allowed:
+                out.append(rp)
+        elif os.path.isdir(rp):
+            out.append(rp)
+    return out
+
+
+def _workspace_order_paths_filtered():
+    dest = pathlib.Path.home() / ".cursor-setup" / "dashboard-workspace-order.json"
+    raw = []
+    if dest.is_file():
+        try:
+            data = json.loads(dest.read_text(encoding="utf-8"))
+            if isinstance(data, list):
+                raw = [str(x).strip() for x in data if isinstance(x, str) and str(x).strip()]
+        except Exception:
+            pass
+    al = os.environ.get("CURSOR_DASH_ALLOWLIST", "")
+    allowed = set()
+    if al and os.path.isfile(al):
+        with open(al, encoding="utf-8", errors="replace") as fp:
+            for line in fp:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    allowed.add(os.path.realpath(line))
+                except OSError:
+                    continue
+    use_allowlist = len(allowed) > 0
+    out = []
+    for x in raw:
+        try:
+            rp = os.path.realpath(x)
+        except OSError:
+            continue
+        if use_allowlist:
+            if rp in allowed:
+                out.append(rp)
+        elif os.path.isdir(rp):
+            out.append(rp)
+    return out
+
+
+def _send_json(handler, obj, status=200):
+    b = json.dumps(obj, ensure_ascii=False).encode("utf-8")
+    handler.send_response(status)
+    handler.send_header("Content-Type", "application/json; charset=utf-8")
+    handler.send_header("Cache-Control", "no-store")
+    handler.send_header("Content-Length", str(len(b)))
+    handler.end_headers()
+    handler.wfile.write(b)
+
+
+def _ws_path_match_entry_path(rawp, target_resolved):
+    rawp = (rawp or "").replace("\r", "").strip()
+    ap = pathlib.Path(rawp).expanduser()
+    try:
+        try:
+            ap = ap.resolve(strict=False)
+        except TypeError:
+            ap = ap.resolve()
+    except OSError:
+        try:
+            ap = pathlib.Path(os.path.realpath(str(rawp)))
+        except OSError:
+            return False
+    if ap == target_resolved:
+        return True
+    try:
+        if ap.exists() and target_resolved.exists() and os.path.samefile(ap, target_resolved):
+            return True
+    except OSError:
+        pass
+    return os.path.normcase(str(ap)) == os.path.normcase(str(target_resolved))
+
+
+def _workspace_services_jsonl_path():
+    return pathlib.Path.home() / ".cursor-setup" / "workspace-services.jsonl"
+
+
+def _workspace_services_upsert_exec(ws_real, exec_abs, port_opt=None):
+    f = _workspace_services_jsonl_path()
+    f.parent.mkdir(parents=True, exist_ok=True)
+    tgt = pathlib.Path(ws_real).resolve()
+    lines_kept = []
+    last_match = None
+    text = f.read_text(encoding="utf-8", errors="replace") if f.is_file() else ""
+    for line in text.splitlines():
+        raw = line.strip()
+        if not raw or raw.startswith("#"):
+            lines_kept.append(line)
+            continue
+        try:
+            o = json.loads(raw)
+        except json.JSONDecodeError:
+            lines_kept.append(line)
+            continue
+        rp = o.get("path") or ""
+        if _ws_path_match_entry_path(rp, tgt):
+            last_match = o
+            continue
+        lines_kept.append(line)
+    merged = dict(last_match) if last_match else {}
+    merged["path"] = str(tgt)
+    merged["exec"] = exec_abs
+    if "shell" in merged:
+        del merged["shell"]
+    if port_opt is not None:
+        merged["port"] = int(port_opt)
+    lines_kept.append(json.dumps(merged, ensure_ascii=False))
+    nf = f.with_name(f.name + ".tmp")
+    nf.write_text("\n".join(lines_kept) + "\n", encoding="utf-8")
+    nf.replace(f)
+
+
+def _safe_filename(name):
+    name = os.path.basename(name or "")
+    name = re.sub(r"[^\w.\- ]+", "_", name).strip("._")[:120]
+    return name or "exec-file"
+
+
+def _stash_exec_file(ws_real, filename, raw):
+    stash = pathlib.Path.home() / ".cursor-setup" / "workspace-exec-stash"
+    stash.mkdir(parents=True, exist_ok=True)
+    base = _safe_filename(filename)
+    ws_tag = _safe_filename(os.path.basename(ws_real))[:40]
+    dest = stash / (ws_tag + "_" + base)
+    n = 0
+    while dest.exists():
+        n += 1
+        dest = stash / (ws_tag + "_" + str(n) + "_" + base)
+    dest.write_bytes(raw)
+    try:
+        suf = dest.suffix.lower()
+        if suf in (".command", ".sh", ".tool") or dest.name.endswith(".command"):
+            os.chmod(dest, 0o755)
+    except OSError:
+        pass
+    return str(dest.resolve())
+
+
+def _multipart_parse(ct, rawb):
+    try:
+        from io import BytesIO
+        from cgi import FieldStorage
+
+        env = {
+            "REQUEST_METHOD": "POST",
+            "CONTENT_TYPE": ct,
+            "CONTENT_LENGTH": str(len(rawb)),
+        }
+        fs = FieldStorage(fp=BytesIO(rawb), environ=env, keep_blank_values=True)
+        fields = {}
+        files = {}
+        if "path" in fs:
+            fields["path"] = fs.getfirst("path") or ""
+        if "port" in fs:
+            fields["port"] = fs.getfirst("port") or ""
+        if "file" in fs:
+            item = fs["file"]
+            if isinstance(item, list):
+                item = item[0] if item else None
+            if item is not None:
+                fn = getattr(item, "filename", None) or ""
+                fobj = getattr(item, "file", None)
+                blob = fobj.read() if fobj is not None else b""
+                if fn or blob:
+                    files["file"] = (fn or "upload.bin", blob)
+        return fields, files
+    except Exception:
+        pass
+    return _multipart_parse_manual(ct, rawb)
+
+
+def _multipart_parse_manual(content_type, data):
+    fields = {}
+    files = {}
+    if "multipart/form-data" not in content_type or "boundary=" not in content_type:
+        return fields, files
+    bd = content_type.split("boundary=", 1)[1].strip()
+    if bd.startswith('"') and bd.endswith('"'):
+        bd = bd[1:-1]
+    bdelim = b"--" + bd.encode("ascii", errors="ignore")
+    for part in data.split(bdelim):
+        part = part.strip(b"\r\n")
+        if not part or part == b"--":
+            continue
+        if b"\r\n\r\n" not in part:
+            continue
+        head, body = part.split(b"\r\n\r\n", 1)
+        if body.endswith(b"\r\n"):
+            body = body[:-2]
+        htext = head.decode("latin1", errors="replace")
+        name = None
+        filename = None
+        for hl in htext.split("\r\n"):
+            if hl.lower().startswith("content-disposition:"):
+                m = re.search(r'name="([^"]+)"', hl)
+                if m:
+                    name = m.group(1)
+                m2 = re.search(r'filename="([^"]*)"', hl)
+                if m2:
+                    filename = m2.group(1)
+        if not name:
+            continue
+        if filename is not None:
+            files[name] = (filename, body)
+        else:
+            fields[name] = body.decode("utf-8", errors="replace")
+    return fields, files
+
+
+def _mac_choose_file_posix():
+    scr = 'POSIX path of (choose file with prompt "실행 파일 선택")'
+    try:
+        r = subprocess.run(
+            ["osascript", "-e", scr],
+            capture_output=True,
+            text=True,
+            timeout=600,
+        )
+    except subprocess.TimeoutExpired:
+        return None
+    if r.returncode != 0:
+        return None
+    p = (r.stdout or "").strip().rstrip("\n")
+    return p or None
+
 
 class H(BaseHTTPRequestHandler):
     server_version = "CursorSetupDash/1.0"
 
     def log_message(self, fmt, *args):
         pass
+
+    def handle_one_request(self):
+        try:
+            super().handle_one_request()
+        except (BrokenPipeError, ConnectionResetError):
+            # 브라우저가 응답 도중 연결을 끊는 경우(새로고침/탭 닫기)는 정상 동작으로 본다.
+            return
 
     def _run_term(self, script_body, auto_close=False):
         if auto_close:
@@ -31,10 +440,22 @@ class H(BaseHTTPRequestHandler):
         scpt = "tell application \"Terminal\" to do script " + aq(wrapped)
         subprocess.run(["osascript", "-e", scpt], check=False)
 
+    def _dash_lang_from_headers(self):
+        c = self.headers.get("Cookie", "") or ""
+        for part in c.split(";"):
+            part = part.strip()
+            if part.lower().startswith("cursor_dash_lang="):
+                v = part.split("=", 1)[1].strip().lower()
+                if v == "en":
+                    return "en"
+        return "ko"
+
     def _regen(self):
         setup = os.environ["CURSOR_SETUP_SCRIPT"]
         htm = os.environ["CURSOR_DASH_HTML"]
-        subprocess.run([setup, "--_cursor-setup-write-dash", htm], check=False)
+        env = os.environ.copy()
+        env["CURSOR_DASH_LANG"] = self._dash_lang_from_headers()
+        subprocess.run([setup, "--_cursor-setup-write-dash", htm], env=env, check=False)
 
     def _allow_ok(self, path):
         path = os.path.realpath(path)
@@ -42,7 +463,7 @@ class H(BaseHTTPRequestHandler):
             return False
         al = os.environ.get("CURSOR_DASH_ALLOWLIST", "")
         if not al or not os.path.isfile(al):
-            return False
+            return True
         with open(al, "r", encoding="utf-8", errors="replace") as f:
             for line in f:
                 line = line.strip()
@@ -74,26 +495,75 @@ class H(BaseHTTPRequestHandler):
         return b.encode("utf-8")
 
     def do_GET(self):
-        p = self.path.split("?", 1)[0]
+        parsed = urllib.parse.urlparse(self.path)
+        p = parsed.path
         if p == "/refresh":
-            self._regen()
             self.send_response(302)
             self.send_header("Location", "/")
             self.end_headers()
             return
         if p in ("/", "/index.html"):
+            q = urllib.parse.parse_qs(parsed.query or "")
+            if "lang" in q and q["lang"]:
+                v = (q["lang"][0] or "").lower()
+                if v in ("en", "ko"):
+                    self.send_response(302)
+                    self.send_header("Location", "/")
+                    self.send_header(
+                        "Set-Cookie",
+                        "cursor_dash_lang=" + v + "; Path=/; Max-Age=31536000; SameSite=Lax",
+                    )
+                    self.end_headers()
+                    return
+            # 브라우저 새로고침(F5)도 최신 git remote·상태를 쓰려면 매번 다시 그림
+            self._regen()
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Cache-Control", "no-store")
             self.end_headers()
             with open(os.environ["CURSOR_DASH_HTML"], "rb") as fp:
                 self.wfile.write(fp.read())
+            return
+        if p == "/favorite-list":
+            data = _favorite_paths_filtered()
+            body = json.dumps(data, ensure_ascii=False).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+        if p == "/workspace-order-list":
+            data = _workspace_order_paths_filtered()
+            body = json.dumps(data, ensure_ascii=False).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
             return
         self.send_error(404)
 
     def do_POST(self):
         root = os.environ["CURSOR_SETUP_ROOT"]
         setup = os.environ["CURSOR_SETUP_SCRIPT"]
-        p = self.path
+        p = self.path.split("?", 1)[0]
+        if p == "/set-lang":
+            length = int(self.headers.get("Content-Length", "0"))
+            body = self.rfile.read(length).decode("utf-8", errors="replace") if length else ""
+            q = urllib.parse.parse_qs(body)
+            raw = (q.get("lang") or [""])[0].strip().lower()
+            if raw not in ("ko", "en"):
+                raw = "ko"
+            self.send_response(204)
+            self.send_header(
+                "Set-Cookie",
+                "cursor_dash_lang=" + raw + "; Path=/; Max-Age=31536000; SameSite=Lax",
+            )
+            self.end_headers()
+            return
         if p == "/configure":
             allow_path = os.environ.get("CURSOR_DASH_ALLOWLIST", "")
             if allow_path:
@@ -136,10 +606,489 @@ class H(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(self._html_ok())
             return
+        if p == "/tunnel-workspace":
+            allow_path = os.environ.get("CURSOR_DASH_ALLOWLIST", "")
+            if allow_path:
+                subprocess.run(
+                    [setup, "--_cursor-setup-write-allowlist", allow_path],
+                    check=False,
+                )
+            length = int(self.headers.get("Content-Length", "0"))
+            body = self.rfile.read(length).decode("utf-8", errors="replace")
+            q = urllib.parse.parse_qs(body)
+            raw = (q.get("path") or [""])[0].strip()
+            if not self._allow_ok(raw):
+                self.send_response(403)
+                self.send_header("Content-Type", "text/html; charset=utf-8")
+                self.end_headers()
+                self.wfile.write(self._html_denied())
+                return
+            rp = os.path.realpath(raw)
+            inner = "export CURSOR_SETUP_TUNNEL_WORKSPACE={}; export CURSOR_SETUP_CF_FORCE=1; cd {} && /bin/bash {} --tunnel-only".format(
+                shlex.quote(rp),
+                shlex.quote(root),
+                shlex.quote(setup),
+            )
+            self._run_term(inner, auto_close=False)
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.end_headers()
+            self.wfile.write(self._html_ok())
+            return
+        if p == "/rename-repo":
+            allow_path = os.environ.get("CURSOR_DASH_ALLOWLIST", "")
+            if allow_path:
+                subprocess.run(
+                    [setup, "--_cursor-setup-write-allowlist", allow_path],
+                    check=False,
+                )
+            length = int(self.headers.get("Content-Length", "0"))
+            body = self.rfile.read(length).decode("utf-8", errors="replace")
+            q = urllib.parse.parse_qs(body)
+            raw = (q.get("path") or [""])[0].strip()
+            newn = (q.get("new_name") or [""])[0].strip()
+            if not self._allow_ok(raw) or not newn:
+                self.send_response(403)
+                self.send_header("Content-Type", "text/html; charset=utf-8")
+                self.end_headers()
+                self.wfile.write(self._html_denied())
+                return
+            inner = "/bin/bash {} --rename-repo {} {}".format(
+                shlex.quote(setup),
+                shlex.quote(raw),
+                shlex.quote(newn),
+            )
+            self._run_term(inner, auto_close=True)
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.end_headers()
+            self.wfile.write(self._html_ok())
+            return
+        if p == "/workspace-service-start":
+            allow_path = os.environ.get("CURSOR_DASH_ALLOWLIST", "")
+            if allow_path:
+                subprocess.run(
+                    [setup, "--_cursor-setup-write-allowlist", allow_path],
+                    check=False,
+                )
+            length = int(self.headers.get("Content-Length", "0"))
+            body = self.rfile.read(length).decode("utf-8", errors="replace")
+            q = urllib.parse.parse_qs(body)
+            raw = (q.get("path") or [""])[0].strip()
+            if not self._allow_ok(raw):
+                self.send_response(403)
+                self.send_header("Content-Type", "text/html; charset=utf-8")
+                self.end_headers()
+                self.wfile.write(self._html_denied())
+                return
+            rp = os.path.realpath(raw)
+            sh, _po = _workspace_service_read(rp)
+            if not sh:
+                self.send_response(404)
+                self.send_header("Content-Type", "text/html; charset=utf-8")
+                self.end_headers()
+                self.wfile.write(
+                    (
+                        "<!DOCTYPE html><html lang=ko><meta charset=utf-8>"
+                        "<body style=background:#0d1117;color:#e6edf3;padding:24px>"
+                        "<p>이 폴더에 exec(실행 파일) 또는 shell 이 workspace-services.jsonl 에 없습니다.</p>"
+                        "<p><a href=/ style=color:#2f81f7>대시보드</a></p></body></html>"
+                    ).encode("utf-8")
+                )
+                return
+            # dev server 가 LAN(동일 네트워크)에서도 접근 가능하도록 host 관련 env를 기본 주입
+            inner = (
+                "cd {} && "
+                "export HOST=0.0.0.0 VITE_HOST=0.0.0.0 BIND=0.0.0.0 BIND_ADDR=0.0.0.0 "
+                "npm_config_host=0.0.0.0 && {}"
+            ).format(shlex.quote(rp), sh)
+            self._run_term(inner, auto_close=False)
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.end_headers()
+            self.wfile.write(self._html_ok())
+            return
+        if p == "/workspace-service-open":
+            allow_path = os.environ.get("CURSOR_DASH_ALLOWLIST", "")
+            if allow_path:
+                subprocess.run(
+                    [setup, "--_cursor-setup-write-allowlist", allow_path],
+                    check=False,
+                )
+            length = int(self.headers.get("Content-Length", "0"))
+            body = self.rfile.read(length).decode("utf-8", errors="replace")
+            q = urllib.parse.parse_qs(body)
+            raw = (q.get("path") or [""])[0].strip()
+            if not self._allow_ok(raw):
+                self.send_response(403)
+                self.send_header("Content-Type", "text/html; charset=utf-8")
+                self.end_headers()
+                self.wfile.write(self._html_denied())
+                return
+            rp = os.path.realpath(raw)
+            _sh, po = _workspace_service_read(rp)
+            ov = (q.get("port") or [""])[0].strip()
+            if ov.isdigit():
+                pn = int(ov)
+                if 1 <= pn <= 65535:
+                    po = pn
+            if not po:
+                self.send_response(400)
+                self.send_header("Content-Type", "text/html; charset=utf-8")
+                self.end_headers()
+                self.wfile.write(
+                    (
+                        "<!DOCTYPE html><html lang=ko><meta charset=utf-8>"
+                        "<body style=background:#0d1117;color:#e6edf3;padding:24px>"
+                        "<p>열 포트가 없습니다.</p>"
+                        "<p><a href=/ style=color:#2f81f7>대시보드</a></p></body></html>"
+                    ).encode("utf-8")
+                )
+                return
+            nw = (q.get("network") or [""])[0].strip() in ("1", "true", "yes", "on")
+            host = "127.0.0.1"
+            if nw:
+                lan = _lan_ipv4()
+                if lan:
+                    host = lan
+            subprocess.Popen(
+                ["open", "http://{}:{}/".format(host, int(po))],
+                env=os.environ,
+                close_fds=True,
+            )
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.end_headers()
+            self.wfile.write(self._html_ok())
+            return
+        if p == "/workspace-service-stop":
+            allow_path = os.environ.get("CURSOR_DASH_ALLOWLIST", "")
+            if allow_path:
+                subprocess.run(
+                    [setup, "--_cursor-setup-write-allowlist", allow_path],
+                    check=False,
+                )
+            length = int(self.headers.get("Content-Length", "0"))
+            body = self.rfile.read(length).decode("utf-8", errors="replace")
+            q = urllib.parse.parse_qs(body)
+            raw = (q.get("path") or [""])[0].strip()
+            if not self._allow_ok(raw):
+                self.send_response(403)
+                self.send_header("Content-Type", "text/html; charset=utf-8")
+                self.end_headers()
+                self.wfile.write(self._html_denied())
+                return
+            rp = os.path.realpath(raw)
+            _sh, po = _workspace_service_read(rp)
+            ov = (q.get("port") or [""])[0].strip()
+            if ov.isdigit():
+                pn = int(ov)
+                if 1 <= pn <= 65535:
+                    po = pn
+            if not po:
+                self.send_response(400)
+                self.send_header("Content-Type", "text/html; charset=utf-8")
+                self.end_headers()
+                self.wfile.write(
+                    (
+                        "<!DOCTYPE html><html lang=ko><meta charset=utf-8>"
+                        "<body style=background:#0d1117;color:#e6edf3;padding:24px>"
+                        "<p>끌 포트가 없습니다. 폼에서 포트를 보내거나 jsonl 에 port 를 적어 주세요.</p>"
+                        "<p><a href=/ style=color:#2f81f7>대시보드</a></p></body></html>"
+                    ).encode("utf-8")
+                )
+                return
+            inner = (
+                "p=$(lsof -nP -tiTCP:%d -sTCP:LISTEN 2>/dev/null); "
+                '[[ -n "$p" ]] && kill $p 2>/dev/null; sleep 0.4; '
+                "p=$(lsof -nP -tiTCP:%d -sTCP:LISTEN 2>/dev/null); "
+                '[[ -n "$p" ]] && kill -9 $p 2>/dev/null; true'
+            ) % (po, po)
+            self._run_term(inner, auto_close=True)
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.end_headers()
+            self.wfile.write(self._html_ok())
+            return
+        if p == "/workspace-exec-choose":
+            allow_path = os.environ.get("CURSOR_DASH_ALLOWLIST", "")
+            if allow_path:
+                subprocess.run(
+                    [setup, "--_cursor-setup-write-allowlist", allow_path],
+                    check=False,
+                )
+            length = int(self.headers.get("Content-Length", "0"))
+            body = self.rfile.read(length).decode("utf-8", errors="replace")
+            q = urllib.parse.parse_qs(body)
+            raw = (q.get("path") or [""])[0].strip()
+            if not self._allow_ok(raw):
+                _send_json(self, {"ok": False, "err": "허용되지 않은 폴더"}, 403)
+                return
+            if sys.platform != "darwin":
+                _send_json(
+                    self,
+                    {"ok": False, "err": "Finder 선택은 macOS 전용입니다 · 찾아보기로 올리세요"},
+                    400,
+                )
+                return
+            rp = os.path.realpath(raw)
+            pv = (q.get("port") or [""])[0].strip()
+            po = int(pv) if pv.isdigit() and 1 <= int(pv) <= 65535 else None
+            chosen = _mac_choose_file_posix()
+            if not chosen:
+                _send_json(self, {"ok": False, "err": "취소됨"}, 200)
+                return
+            try:
+                cpath = os.path.realpath(chosen)
+            except OSError:
+                _send_json(self, {"ok": False, "err": "경로 오류"}, 400)
+                return
+            if not os.path.isfile(cpath):
+                _send_json(self, {"ok": False, "err": "파일이 아닙니다"}, 400)
+                return
+            try:
+                _workspace_services_upsert_exec(rp, cpath, po)
+            except OSError as ex:
+                _send_json(self, {"ok": False, "err": str(ex)}, 500)
+                return
+            _send_json(self, {"ok": True, "exec": cpath}, 200)
+            return
+        if p == "/workspace-exec-upload":
+            allow_path = os.environ.get("CURSOR_DASH_ALLOWLIST", "")
+            if allow_path:
+                subprocess.run(
+                    [setup, "--_cursor-setup-write-allowlist", allow_path],
+                    check=False,
+                )
+            ct = self.headers.get("Content-Type", "")
+            if "multipart/form-data" not in ct:
+                _send_json(self, {"ok": False, "err": "multipart/form-data 가 필요합니다"}, 400)
+                return
+            length = int(self.headers.get("Content-Length", "0"))
+            rawb = self.rfile.read(length)
+            fields, files = _multipart_parse(ct, rawb)
+            raw = (fields.get("path") or "").strip()
+            if not self._allow_ok(raw):
+                _send_json(self, {"ok": False, "err": "허용되지 않은 폴더"}, 403)
+                return
+            rp = os.path.realpath(raw)
+            fl = files.get("file")
+            if not fl:
+                _send_json(self, {"ok": False, "err": "파일이 없습니다"}, 400)
+                return
+            fname, fbody = fl
+            if len(fbody) > 12 * 1024 * 1024:
+                _send_json(self, {"ok": False, "err": "12MB 이하만 가능합니다"}, 400)
+                return
+            pv = (fields.get("port") or "").strip()
+            po = int(pv) if pv.isdigit() and 1 <= int(pv) <= 65535 else None
+            try:
+                dest = _stash_exec_file(rp, fname, fbody)
+                _workspace_services_upsert_exec(rp, dest, po)
+            except OSError as ex:
+                _send_json(self, {"ok": False, "err": str(ex)}, 500)
+                return
+            _send_json(self, {"ok": True, "exec": dest}, 200)
+            return
+        if p == "/favorite-save":
+            al = os.environ.get("CURSOR_DASH_ALLOWLIST", "")
+            allowed = set()
+            if al and os.path.isfile(al):
+                with open(al, encoding="utf-8", errors="replace") as fp:
+                    for line in fp:
+                        line = line.strip()
+                        if not line:
+                            continue
+                        try:
+                            allowed.add(os.path.realpath(line))
+                        except OSError:
+                            continue
+            length = int(self.headers.get("Content-Length", "0"))
+            body = self.rfile.read(length).decode("utf-8", errors="replace")
+            try:
+                arr = json.loads(body)
+            except json.JSONDecodeError:
+                self.send_response(400)
+                self.send_header("Content-Type", "text/html; charset=utf-8")
+                self.end_headers()
+                return
+            if not isinstance(arr, list):
+                self.send_response(400)
+                self.send_header("Content-Type", "text/html; charset=utf-8")
+                self.end_headers()
+                return
+            use_allowlist = len(allowed) > 0
+            clean = []
+            for x in arr:
+                if not isinstance(x, str):
+                    continue
+                try:
+                    rp = os.path.realpath(x.strip())
+                except OSError:
+                    continue
+                if use_allowlist:
+                    if rp in allowed:
+                        clean.append(rp)
+                elif os.path.isdir(rp):
+                    clean.append(rp)
+            dest = pathlib.Path.home() / ".cursor-setup" / "dashboard-favorites.json"
+            try:
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                dest.write_text(json.dumps(clean, ensure_ascii=False), encoding="utf-8")
+            except OSError:
+                self.send_response(500)
+                self.send_header("Content-Type", "text/html; charset=utf-8")
+                self.end_headers()
+                return
+            self.send_response(204)
+            self.end_headers()
+            return
+        if p == "/workspace-order-save":
+            al = os.environ.get("CURSOR_DASH_ALLOWLIST", "")
+            allowed = set()
+            if al and os.path.isfile(al):
+                with open(al, encoding="utf-8", errors="replace") as fp:
+                    for line in fp:
+                        line = line.strip()
+                        if not line:
+                            continue
+                        try:
+                            allowed.add(os.path.realpath(line))
+                        except OSError:
+                            continue
+            length = int(self.headers.get("Content-Length", "0"))
+            body = self.rfile.read(length).decode("utf-8", errors="replace")
+            try:
+                arr = json.loads(body)
+            except json.JSONDecodeError:
+                self.send_response(400)
+                self.send_header("Content-Type", "text/html; charset=utf-8")
+                self.end_headers()
+                return
+            if not isinstance(arr, list):
+                self.send_response(400)
+                self.send_header("Content-Type", "text/html; charset=utf-8")
+                self.end_headers()
+                return
+            use_allowlist = len(allowed) > 0
+            clean = []
+            seen = set()
+            for x in arr:
+                if not isinstance(x, str):
+                    continue
+                try:
+                    rp = os.path.realpath(x.strip())
+                except OSError:
+                    continue
+                if rp in seen:
+                    continue
+                if use_allowlist:
+                    if rp in allowed:
+                        clean.append(rp)
+                        seen.add(rp)
+                elif os.path.isdir(rp):
+                    clean.append(rp)
+                    seen.add(rp)
+            dest = pathlib.Path.home() / ".cursor-setup" / "dashboard-workspace-order.json"
+            try:
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                dest.write_text(json.dumps(clean, ensure_ascii=False), encoding="utf-8")
+            except OSError:
+                self.send_response(500)
+                self.send_header("Content-Type", "text/html; charset=utf-8")
+                self.end_headers()
+                return
+            self.send_response(204)
+            self.end_headers()
+            return
+        if p == "/dashboard-stop":
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.end_headers()
+            self.wfile.write(self._html_ok())
+
+            def _stop():
+                time.sleep(0.2)
+                self.server.shutdown()
+
+            threading.Thread(target=_stop, daemon=True).start()
+            return
+        if p == "/launch-setup":
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.end_headers()
+            self.wfile.write(self._html_ok())
+            subprocess.Popen(["open", setup], env=os.environ, close_fds=True)
+            return
+        if p == "/workspace-add-folder":
+            ck = (self.headers.get("Cookie", "") or "").replace(" ", "")
+            pr_en = "cursor_dash_lang=en" in ck
+            pr = (
+                "Choose a project folder to add to the list"
+                if pr_en
+                else "추가할 프로젝트 폴더를 선택하세요"
+            )
+            scr = 'POSIX path of (choose folder with prompt "' + pr.replace("\\", "\\\\").replace('"', '\\"') + '")'
+            inner = (
+                "mkdir -p \"$HOME/.cursor-setup\" && f=\"$HOME/.cursor-setup/workspaces.txt\" && touch \"$f\" && "
+                "p=$(osascript -e "
+                + shlex.quote(scr)
+                + " 2>/dev/null) && "
+                "if [[ -n \"$p\" ]]; then r=$(cd \"$p\" 2>/dev/null && pwd -P); "
+                "[[ -n \"$r\" ]] && (grep -Fxq \"$r\" \"$f\" 2>/dev/null || echo \"$r\" >> \"$f\"); fi"
+            )
+            self._run_term(inner, auto_close=True)
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.end_headers()
+            self.wfile.write(self._html_ok())
+            return
         if p.startswith("/action/"):
             uid = os.getuid()
             ag = os.path.expanduser("~/.local/bin/agent")
             agq = shlex.quote(ag)
+            if p == "/action/open-user-workspaces":
+                ws = pathlib.Path.home() / ".cursor-setup" / "workspaces.txt"
+                try:
+                    ws.parent.mkdir(parents=True, exist_ok=True)
+                    ws.touch(exist_ok=True)
+                except OSError:
+                    pass
+                inner = "open -e " + shlex.quote(str(ws))
+                self._run_term(inner, auto_close=True)
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html; charset=utf-8")
+                self.end_headers()
+                self.wfile.write(self._html_ok())
+                return
+            if p == "/action/open-user-services-jsonl":
+                jf = pathlib.Path.home() / ".cursor-setup" / "workspace-services.jsonl"
+                try:
+                    jf.parent.mkdir(parents=True, exist_ok=True)
+                    jf.touch(exist_ok=True)
+                except OSError:
+                    pass
+                inner = "open -e " + shlex.quote(str(jf))
+                self._run_term(inner, auto_close=True)
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html; charset=utf-8")
+                self.end_headers()
+                self.wfile.write(self._html_ok())
+                return
+            if p == "/action/open-cloudflared-config":
+                cf = pathlib.Path.home() / ".cloudflared" / "config.yml"
+                try:
+                    cf.parent.mkdir(parents=True, exist_ok=True)
+                    cf.touch(exist_ok=True)
+                except OSError:
+                    pass
+                inner = "open -e " + shlex.quote(str(cf))
+                self._run_term(inner, auto_close=True)
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html; charset=utf-8")
+                self.end_headers()
+                self.wfile.write(self._html_ok())
+                return
             act = {
                 "/action/gh-login": (
                     "echo ''; echo 'GitHub: 브라우저에서 로그인을 마치면 이 탭이 닫히고 대시보드를 새로고침하세요.'; "
@@ -176,7 +1125,7 @@ class H(BaseHTTPRequestHandler):
 
 def main():
     port = int(os.environ["CURSOR_DASH_PORT"])
-    host = "127.0.0.1"
+    host = os.environ.get("CURSOR_DASH_HOST", "0.0.0.0")
     httpd = HTTPServer((host, port), H)
     print("[정보] 대시보드 http://{}:{}/ (종료: Ctrl+C)".format(host, port), flush=True)
     httpd.serve_forever()
@@ -190,17 +1139,19 @@ PY
 
 dashboard_server_main_blocking() {
   local root="${CURSOR_SETUP_ROOT:-$ROOT}"
-  local port html allow py preferred
+  local port html allow py preferred bind_host
   if ! command_exists python3; then
     log_err "대시보드 서버에 python3 가 필요합니다."
     return 1
   fi
   preferred="${CURSOR_DASH_PORT:-58741}"
-  if python3 -c "import socket; s=socket.socket(); s.bind(('127.0.0.1', int('$preferred'))); s.close()" 2>/dev/null; then
+  bind_host="${CURSOR_DASH_HOST:-0.0.0.0}"
+  dashboard_free_listen_port "$preferred"
+  if python3 -c "import socket; s=socket.socket(); s.bind(('$bind_host', int('$preferred'))); s.close()" 2>/dev/null; then
     port="$preferred"
   else
-    port="$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1]); s.close()')"
-    log_info "기본 포트 ${preferred} 사용 중 — 임시 포트 ${port} 로 뜹니다 (즐겨찾기는 포트마다 따로 저장됩니다)."
+    port="$(python3 -c "import socket; s=socket.socket(); s.bind(('$bind_host',0)); print(s.getsockname()[1]); s.close()")"
+    log_info "포트 ${preferred} 을(를) 비울 수 없어 임시 포트 ${port} 로 뜹니다."
   fi
   html="$(mktemp).html"
   allow="$(mktemp)"
@@ -218,6 +1169,7 @@ dashboard_server_main_blocking() {
   chmod +x "$py" 2>/dev/null || true
 
   export CURSOR_DASH_PORT="$port"
+  export CURSOR_DASH_HOST="$bind_host"
   export CURSOR_DASH_HTML="$html"
   export CURSOR_DASH_ALLOWLIST="$allow"
   export CURSOR_SETUP_SCRIPT="$setup_cmd"

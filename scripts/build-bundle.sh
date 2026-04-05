@@ -24,7 +24,7 @@ export CURSOR_SETUP_ROOT="$ROOT"
 
 HEADER
 
-  for name in common status_report dashboard_html dashboard_flow gui preflight github cursor_agent cloudflare_tunnel summary workspace_flow; do
+  for name in common status_report workspace_services dashboard_html dashboard_flow gui preflight github cursor_agent cloudflare_tunnel summary workspace_flow; do
     printf '# --- scripts/lib/%s.sh ---\n' "$name.sh"
     tail -n +2 "$REPO_ROOT/scripts/lib/${name}.sh"
     printf '\n'
@@ -34,6 +34,12 @@ HEADER
   printf '  cat <<'\''PLIST_TMPL_EOF'\''\n'
   cat "$REPO_ROOT/templates/com.cursor.agent.worker.plist"
   printf 'PLIST_TMPL_EOF\n'
+  printf '}\n\n'
+
+  printf 'cursor_agent_worker_entry_template() {\n'
+  printf '  cat <<'\''ENTRY_TMPL_EOF'\''\n'
+  cat "$REPO_ROOT/templates/agent-worker-entry.sh"
+  printf 'ENTRY_TMPL_EOF\n'
   printf '}\n\n'
 
   cat <<'EARLY_DASH'
@@ -60,6 +66,36 @@ if [[ "${1:-}" == "--_cursor-setup-write-dash" ]]; then
   if [[ -n "${CURSOR_DASH_ALLOWLIST:-}" ]]; then
     discover_workspace_paths > "$CURSOR_DASH_ALLOWLIST"
   fi
+  exit 0
+fi
+if [[ "${1:-}" == "--rename-repo" ]]; then
+  shift
+  _rr_path="${1:-}"
+  _rr_name="${2:-}"
+  [[ -n "$_rr_path" && -n "$_rr_name" ]] || exit 1
+  _rr_path="$(expand_tilde "$_rr_path")"
+  _rr_path="$(cd "$_rr_path" 2>/dev/null && pwd -P)" || {
+    log_err "폴더 없음: $_rr_path"
+    exit 1
+  }
+  cd "$_rr_path" || exit 1
+  github_validate_repo_name "$_rr_name" || {
+    log_err "저장소 이름: 영숫자 . _ - 만, 1~100자"
+    exit 1
+  }
+  _rr_origin="$(git remote get-url origin 2>/dev/null || true)"
+  _rr_cur="$(github_repo_name_from_remote_url "$_rr_origin" 2>/dev/null)" || true
+  [[ -n "$_rr_cur" ]] || {
+    log_err "github.com origin 이 아닙니다."
+    exit 1
+  }
+  if [[ "$_rr_cur" == "$_rr_name" ]]; then
+    log_info "이미 저장소 이름이 '$_rr_name' 입니다."
+    exit 0
+  fi
+  log_info "GitHub 저장소 이름: $_rr_cur → $_rr_name"
+  gh repo rename "$_rr_name" --yes || exit 1
+  log_info "완료. 대시보드를 새로고침 하세요."
   exit 0
 fi
 

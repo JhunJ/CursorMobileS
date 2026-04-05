@@ -26,6 +26,10 @@ if [[ "${1:-}" == "--_cursor-setup-write-dash" ]]; then
   source "$ROOT/scripts/lib/common.sh"
   # shellcheck source=scripts/lib/status_report.sh
   source "$ROOT/scripts/lib/status_report.sh"
+  # shellcheck source=scripts/lib/github.sh
+  source "$ROOT/scripts/lib/github.sh"
+  # shellcheck source=scripts/lib/workspace_services.sh
+  source "$ROOT/scripts/lib/workspace_services.sh"
   # shellcheck source=scripts/lib/dashboard_html.sh
   source "$ROOT/scripts/lib/dashboard_html.sh"
   if [[ -f "$ROOT/setup" ]]; then
@@ -39,6 +43,43 @@ if [[ "${1:-}" == "--_cursor-setup-write-dash" ]]; then
   if [[ -n "${CURSOR_DASH_ALLOWLIST:-}" ]]; then
     discover_workspace_paths > "$CURSOR_DASH_ALLOWLIST"
   fi
+  exit 0
+fi
+
+# 대시보드: GitHub 저장소 이름 변경 (gh repo rename → 원격 URL 자동 갱신)
+if [[ "${1:-}" == "--rename-repo" ]]; then
+  shift
+  _rr_path="${1:-}"
+  _rr_name="${2:-}"
+  [[ -n "$_rr_path" && -n "$_rr_name" ]] || exit 1
+  # shellcheck source=scripts/lib/common.sh
+  source "$ROOT/scripts/lib/common.sh"
+  # shellcheck source=scripts/lib/github.sh
+  source "$ROOT/scripts/lib/github.sh"
+  _rr_path="$(expand_tilde "$_rr_path")"
+  _rr_path="$(cd "$_rr_path" 2>/dev/null && pwd -P)" || {
+    log_err "폴더 없음: $_rr_path"
+    exit 1
+  }
+  cd "$_rr_path" || exit 1
+  github_validate_repo_name "$_rr_name" || {
+    log_err "저장소 이름: 영숫자 . _ - 만, 1~100자"
+    exit 1
+  }
+  _rr_origin="$(git remote get-url origin 2>/dev/null || true)"
+  _rr_cur=""
+  _rr_cur="$(github_repo_name_from_remote_url "$_rr_origin" 2>/dev/null)" || true
+  [[ -n "$_rr_cur" ]] || {
+    log_err "github.com origin 이 아닙니다."
+    exit 1
+  }
+  if [[ "$_rr_cur" == "$_rr_name" ]]; then
+    log_info "이미 저장소 이름이 '$_rr_name' 입니다."
+    exit 0
+  fi
+  log_info "GitHub 저장소 이름: $_rr_cur → $_rr_name"
+  gh repo rename "$_rr_name" --yes || exit 1
+  log_info "완료. 대시보드를 새로고침 하세요."
   exit 0
 fi
 
@@ -78,7 +119,7 @@ usage() {
   --with-cloudflare   Tunnel 포함해 전체 마법사
   --skip-cloudflare   Tunnel 제외 전체 마법사
   --dry-run           명령만 보여 주기
-  --status [폴더]     터미널에 상태만 (기본 ~/Dev/AutoCRF)
+  --status [폴더]     터미널에 상태만 (기본: CURSOR_SETUP_DEFAULT_WORKSPACE 또는 이 저장소 루트)
   --dashboard         기본과 동일 (로컬 대시보드 서버)
   -h, --help          도움말
 
@@ -152,7 +193,7 @@ while [[ $# -gt 0 ]]; do
       if [[ -n "$_st_dir" && "$_st_dir" != -* ]]; then
         shift
       else
-        _st_dir="$HOME/Dev/AutoCRF"
+        _st_dir="${CURSOR_SETUP_DEFAULT_WORKSPACE:-$CURSOR_SETUP_ROOT}"
       fi
       status_dashboard_print "$(expand_tilde "$_st_dir")" ""
       unset _st_dir
