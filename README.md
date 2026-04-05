@@ -11,9 +11,33 @@ Turn a Mac (Mac mini on the desk, or any Mac you SSH into) into a repeatable “
 
 ## What it looks like (your browser, local only)
 
-Below is the **actual dashboard** after you run `./setup` on macOS. Nothing here is hosted on GitHub — it is a page served from **your Mac** at an address like `http://127.0.0.1:58741/`. The **left sidebar** is the recommended order of operations.
+These screenshots are **real captures** of the local dashboard (Chrome headless → PNG). Only **`127.0.0.1`** appears in the UI — no public/WAN IP. Nothing is hosted on GitHub; after `./setup`, the page is served from **your Mac** (port may differ from the examples below).
 
-![CursorMobileS dashboard: Cursor Setup sidebar (3 steps), quick-check status pills, search, favorites with dev ports, refresh](docs/screenshots/dashboard-overview.png)
+**Regenerate the images** (requires Google Chrome on macOS):
+
+```bash
+./scripts/capture-readme-screenshots.sh --auto-start
+```
+
+Or run the same script while your dashboard is already up (`./setup` in another terminal); it will reuse `CURSOR_DASH_PORT`, then `58741`.
+
+### English (default) — overview
+
+Sidebar **Cursor Setup** (3 steps), quick-check pills, search, favorites / ports, refresh.
+
+![Dashboard — English overview](docs/screenshots/dashboard-en.png)
+
+### English — taller viewport (more of the project list)
+
+Same session, larger height so **Favorites** and **Other projects** are easier to see in the README.
+
+![Dashboard — English, extended height](docs/screenshots/dashboard-en-full.png)
+
+### Korean UI
+
+The dashboard supports **KO / EN** (toggle in the sidebar). Korean strings for the same layout:
+
+![Dashboard — Korean overview](docs/screenshots/dashboard-ko.png)
 
 ### Run in this order (matches **Cursor Setup** in the sidebar)
 
@@ -31,7 +55,7 @@ flowchart LR
   S2 --> S3["3 · Dashboard\nhttp://127.0.0.1:port"]
 ```
 
-### Reading the rest of the screenshot
+### Reading the screenshots (same layout in EN / KO)
 
 - **Top pills (e.g. “Tunnel · GitHub · Agent CLI · Worker”)** — One-glance **quick check** of the four big integrations. Green means the dashboard considers that piece in a good state; follow the main cards or sidebar if something needs action.
 - **Search** — Filters the project list by **name or path** when you have many folders.
