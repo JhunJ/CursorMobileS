@@ -1,0 +1,18 @@
+# ~/.cloudflared/config.yml 예시
+# ./setup 가 Tunnel 단계에서 호스트·포트에 맞게 생성하거나 안내합니다.
+#
+# tunnel: <터널_UUID>
+# credentials-file: /Users/본인/.cloudflared/<UUID>.json
+#
+# ingress:
+#   - hostname: app.example.com
+#     service: http://127.0.0.1:8080
+#   - service: http_status:404
+
+tunnel: REPLACE_TUNNEL_UUID
+credentials-file: REPLACE_CREDENTIALS_PATH
+
+ingress:
+  - hostname: REPLACE_HOSTNAME
+    service: http://127.0.0.1:8080
+  - service: http_status:404

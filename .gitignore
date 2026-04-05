@@ -1,0 +1,18 @@
+# 로컬 비밀·환경
+*.env
+.env
+.env.*
+
+# cloudflared (레포에 절대 커밋하지 말 것)
+cloudflared-credentials.json
+**/credentials.json
+
+# macOS
+.DS_Store
+
+# 에디터
+.idea/
+.vscode/
+
+# 백업
+*.bak.*

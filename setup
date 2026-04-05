@@ -1,0 +1,252 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "$0")" && pwd)"
+export CURSOR_SETUP_ROOT="$ROOT"
+
+# 대시보드 서버: 폴더 허용 목록만 갱신 (POST /configure 직전에 호출)
+if [[ "${1:-}" == "--_cursor-setup-write-allowlist" ]]; then
+  shift
+  _al_out="${1:-}"
+  [[ -n "$_al_out" ]] || exit 1
+  # shellcheck source=scripts/lib/common.sh
+  source "$ROOT/scripts/lib/common.sh"
+  # shellcheck source=scripts/lib/status_report.sh
+  source "$ROOT/scripts/lib/status_report.sh"
+  discover_workspace_paths > "$_al_out" || exit 1
+  exit 0
+fi
+
+# 대시보드 서버가 HTML을 다시 그릴 때 (경량 분기)
+if [[ "${1:-}" == "--_cursor-setup-write-dash" ]]; then
+  shift
+  _dash_out="${1:-}"
+  [[ -n "$_dash_out" ]] || exit 1
+  # shellcheck source=scripts/lib/common.sh
+  source "$ROOT/scripts/lib/common.sh"
+  # shellcheck source=scripts/lib/status_report.sh
+  source "$ROOT/scripts/lib/status_report.sh"
+  # shellcheck source=scripts/lib/dashboard_html.sh
+  source "$ROOT/scripts/lib/dashboard_html.sh"
+  if [[ -f "$ROOT/setup" ]]; then
+    export CURSOR_SETUP_EXEC_HINT="$ROOT/setup"
+  elif [[ -f "$ROOT/MacMini-Cursor-Setup.command" ]]; then
+    export CURSOR_SETUP_EXEC_HINT="$ROOT/MacMini-Cursor-Setup.command"
+  else
+    export CURSOR_SETUP_EXEC_HINT="$ROOT/setup"
+  fi
+  CURSOR_SETUP_HTML_QUIET=1 status_dashboard_write_html_interactive "$_dash_out" || exit 1
+  if [[ -n "${CURSOR_DASH_ALLOWLIST:-}" ]]; then
+    discover_workspace_paths > "$CURSOR_DASH_ALLOWLIST"
+  fi
+  exit 0
+fi
+
+# shellcheck source=scripts/lib/common.sh
+source "$ROOT/scripts/lib/common.sh"
+# shellcheck source=scripts/lib/status_report.sh
+source "$ROOT/scripts/lib/status_report.sh"
+# shellcheck source=scripts/lib/dashboard_html.sh
+source "$ROOT/scripts/lib/dashboard_html.sh"
+# shellcheck source=scripts/lib/gui.sh
+source "$ROOT/scripts/lib/gui.sh"
+# shellcheck source=scripts/lib/dashboard_flow.sh
+source "$ROOT/scripts/lib/dashboard_flow.sh"
+
+usage() {
+  cat <<'EOF'
+맥미니 통합 셋업 (Cursor + GitHub + 선택 Cloudflare Tunnel)
+
+실행 파일
+  • 이 저장소를 쓸 때:  프로젝트 폴더의 ./setup
+  • 배포용 한 파일:    dist/MacMini-Cursor-Setup.command (scripts/build-bundle.sh 로 생성 후 더블클릭)
+
+사용법:
+  ./setup [옵션]
+
+기본:
+  인수 없이 실행하면 브라우저 대시보드(로컬)만 뜹니다.
+  폴더 카드에서 버튼을 누르면 터미널이 열리고, 그 폴더 기준으로 아직 안 된 설정만 이어갑니다.
+
+옵션:
+  --full-wizard       터미널에서 처음부터 전체 마법사 (구 방식)
+  --workspace PATH    위와 동일 흐름을 터미널에서 바로 (대시보드 없이)
+  --tunnel-only       Cloudflare Tunnel 단계만 터미널에서
+  --interactive       질문을 하나씩 터미널에서 물어봄 (기본은 자동으로 기본값만 사용)
+  --gui               전체 마법사 + 창(osa) 질문
+  --cli               환영/대시보드 없이 터미널 전체 마법사
+  --with-cloudflare   Tunnel 포함해 전체 마법사
+  --skip-cloudflare   Tunnel 제외 전체 마법사
+  --dry-run           명령만 보여 주기
+  --status [폴더]     터미널에 상태만 (기본 ~/Dev/AutoCRF)
+  --dashboard         기본과 동일 (로컬 대시보드 서버)
+  -h, --help          도움말
+
+단일 파일: scripts/build-bundle.sh → dist/MacMini-Cursor-Setup.command
+EOF
+}
+
+CURSOR_SETUP_DRY_RUN=0
+CURSOR_SETUP_RUN_MAIN=0
+CURSOR_SETUP_WORKSPACE_PATH=""
+CURSOR_SETUP_TUNNEL_ONLY=0
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --dry-run) CURSOR_SETUP_DRY_RUN=1; export CURSOR_SETUP_DRY_RUN; CURSOR_SETUP_RUN_MAIN=1; shift ;;
+    --gui)
+      export CURSOR_SETUP_GUI=1
+      export CURSOR_SETUP_GUI_INTERACTIVE_CHOSEN=1
+      CURSOR_SETUP_RUN_MAIN=1
+      shift
+      ;;
+    --cli)
+      export CURSOR_SETUP_CLI=1
+      export CURSOR_SETUP_GUI=0
+      export CURSOR_SETUP_GUI_INTERACTIVE_CHOSEN=1
+      CURSOR_SETUP_RUN_MAIN=1
+      shift
+      ;;
+    --interactive)
+      export CURSOR_SETUP_FAST_PROMPTS=0
+      shift
+      ;;
+    --full-wizard)
+      CURSOR_SETUP_RUN_MAIN=1
+      shift
+      ;;
+    --workspace)
+      shift
+      CURSOR_SETUP_WORKSPACE_PATH="${1:-}"
+      if [[ -z "$CURSOR_SETUP_WORKSPACE_PATH" || "$CURSOR_SETUP_WORKSPACE_PATH" == -* ]]; then
+        log_err "--workspace 다음에 폴더 경로가 필요합니다."
+        exit 1
+      fi
+      shift
+      CURSOR_SETUP_RUN_MAIN=1
+      ;;
+    --tunnel-only)
+      CURSOR_SETUP_TUNNEL_ONLY=1
+      CURSOR_SETUP_RUN_MAIN=1
+      shift
+      ;;
+    --with-cloudflare)
+      export CURSOR_SETUP_WITH_CF=1
+      export CURSOR_SETUP_CF_FORCE=1
+      export CURSOR_SETUP_CF_USER_PRESET=1
+      CURSOR_SETUP_RUN_MAIN=1
+      shift
+      ;;
+    --skip-cloudflare)
+      export CURSOR_SETUP_WITH_CF=0
+      export CURSOR_SETUP_CF_USER_PRESET=1
+      CURSOR_SETUP_RUN_MAIN=1
+      shift
+      ;;
+    --dashboard)
+      shift
+      ;;
+    --status)
+      shift
+      _st_dir="${1:-}"
+      if [[ -n "$_st_dir" && "$_st_dir" != -* ]]; then
+        shift
+      else
+        _st_dir="$HOME/Dev/AutoCRF"
+      fi
+      status_dashboard_print "$(expand_tilde "$_st_dir")" ""
+      unset _st_dir
+      exit 0
+      ;;
+    -h|--help) usage; exit 0 ;;
+    *)
+      log_err "알 수 없는 옵션: $1"
+      usage
+      exit 1
+      ;;
+  esac
+done
+
+: "${CURSOR_SETUP_FAST_PROMPTS:=1}"
+export CURSOR_SETUP_FAST_PROMPTS
+
+if [[ -n "$CURSOR_SETUP_WORKSPACE_PATH" ]]; then
+  # shellcheck disable=SC1091
+  source "$ROOT/scripts/lib/preflight.sh"
+  # shellcheck disable=SC1091
+  source "$ROOT/scripts/lib/github.sh"
+  # shellcheck disable=SC1091
+  source "$ROOT/scripts/lib/cursor_agent.sh"
+  # shellcheck disable=SC1091
+  source "$ROOT/scripts/lib/summary.sh"
+  # shellcheck disable=SC1091
+  source "$ROOT/scripts/lib/workspace_flow.sh"
+  gui_after_parse_choose_mode
+  if ! is_macos; then
+    log_err "macOS 전용"
+    exit 1
+  fi
+  workspace_setup_main "$CURSOR_SETUP_WORKSPACE_PATH"
+  exit 0
+fi
+
+if [[ "$CURSOR_SETUP_TUNNEL_ONLY" == "1" ]]; then
+  # shellcheck disable=SC1091
+  source "$ROOT/scripts/lib/preflight.sh"
+  # shellcheck disable=SC1091
+  source "$ROOT/scripts/lib/cloudflare_tunnel.sh"
+  gui_after_parse_choose_mode
+  if ! is_macos; then
+    log_err "macOS 전용"
+    exit 1
+  fi
+  tunnel_only_main
+  exit 0
+fi
+
+if [[ "$CURSOR_SETUP_RUN_MAIN" == "1" ]]; then
+  gui_after_parse_choose_mode
+  # shellcheck disable=SC1091
+  source "$ROOT/scripts/lib/preflight.sh"
+  # shellcheck disable=SC1091
+  source "$ROOT/scripts/lib/github.sh"
+  # shellcheck disable=SC1091
+  source "$ROOT/scripts/lib/cursor_agent.sh"
+  # shellcheck disable=SC1091
+  source "$ROOT/scripts/lib/cloudflare_tunnel.sh"
+  # shellcheck disable=SC1091
+  source "$ROOT/scripts/lib/summary.sh"
+
+  main() {
+    if ! is_macos; then
+      log_err "macOS 전용"
+      exit 1
+    fi
+
+    preflight_main
+
+    github_main
+
+    cursor_agent_main "$CURSOR_SETUP_WORK_DIR"
+
+    cloudflare_tunnel_main "$CURSOR_SETUP_WORK_DIR"
+
+    summary_main "$CURSOR_SETUP_WORK_DIR" "$CURSOR_SETUP_REPO_NAME"
+  }
+
+  main "$@"
+  exit 0
+fi
+
+# 기본: 로컬 HTTP 대시보드만 (osascript 연속 창 없음)
+if ! is_macos; then
+  log_err "macOS 전용"
+  exit 1
+fi
+if ! command_exists python3; then
+  log_err "기본 대시보드에 python3 가 필요합니다. 설치 후 다시 실행하거나 ./setup --full-wizard 를 쓰세요."
+  exit 1
+fi
+gui_after_parse_choose_mode
+dashboard_server_main_blocking
+exit 0
