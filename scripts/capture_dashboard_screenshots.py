@@ -131,7 +131,7 @@ def main() -> int:
 
     OUT.mkdir(parents=True, exist_ok=True)
 
-    def snap(page, name: str, full: bool = True) -> None:
+    def snap(page, name: str, full: bool = False) -> None:
         path = OUT / name
         page.screenshot(path=str(path), full_page=full)
         print(path)
