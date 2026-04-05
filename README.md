@@ -18,50 +18,57 @@ Turn a Mac (Mac mini on the desk, or any Mac you SSH into) into a repeatable “
 
 ## What it looks like (your browser, local only)
 
-This is the **most important screen** in the project: the local dashboard home page.  
-It is captured from a real run and always uses **`127.0.0.1`** in the address bar (no public/WAN IP).
+This is the **most important part** of the project: the dashboard home and the exact click flow.  
+All screenshots below are real captures and keep the URL on **`127.0.0.1`** only.
 
-![Dashboard — English overview](docs/screenshots/dashboard-en.png)
+### Screen A — Home (start here)
 
-### What to click first (exact order, 30-second guide)
+Open `./setup`, then open the printed URL.  
+This screen gives you the full command center: sidebar steps, quick check, and workspace list.
 
-| Order | Click in the UI | Result |
-|------|------------------|--------|
-| **1** | **Add folder in Finder** (left sidebar, section 1) | Registers project root folders so they appear in the list. |
-| **2** | **Run setup script** (left sidebar, section 2) | Opens Terminal and runs setup for GitHub, Agent, and optional Tunnel steps. |
-| **3** | In a project row, use the setup/continue action | Applies missing setup for that specific workspace only. |
-| **4** | **Refresh** (bottom of main panel) | Re-checks status and updates running/port indicators. |
-| **5** | **Stop dashboard server** (left sidebar, section 3) | Stops the local dashboard server when you are done. |
+![Screen A — Dashboard home](docs/screenshots/01-dashboard-overview-en.png)
 
-### Screen-by-screen sample flow
+### Screen B — Quick Check expanded
 
-1. **Screen A — Dashboard Home (entry screen)**  
-   You should see quick-check pills at the top and project rows below.
-2. **Screen B — Folder Registration**  
-   Use **Add folder in Finder** to include parent directories; then confirm projects appear in the list.
-3. **Screen C — Setup Execution**  
-   Use **Run setup script** to open Terminal and complete missing dependencies/config.
-4. **Screen D — Per-project Operations**  
-   In each project row, use row actions to continue setup, open dev URL, or inspect status.
+Open the **Quick check** fold to verify `Tunnel`, `GitHub`, `Agent CLI`, and `Worker` before you do anything else.
 
-### Button map for the first page (fast orientation)
+![Screen B — Quick check expanded](docs/screenshots/02-quick-check-expanded.png)
 
-- **Left sidebar / 1**: add workspace roots (`workspaces.txt` driven).  
-- **Left sidebar / 2**: run the full setup path (Tunnel, GitHub, Agent).  
-- **Top pills**: instant health snapshot (Tunnel, GitHub, Agent CLI, Worker).  
-- **Search box**: filter by project name or path.  
-- **Favorites & Other projects**: active workspaces and running ports.  
-- **Bottom Refresh**: rescan state without restarting the dashboard.
+### Screen C — Other Projects expanded
+
+Open **Other projects** to review all discovered workspaces (not only favorites).  
+If a project is missing, go back to sidebar step **1** (`Add folder in Finder`).
+
+![Screen C — Other projects expanded](docs/screenshots/03-other-projects-expanded.png)
+
+### Screen D — Workspace actions expanded
+
+Expand a workspace row and click the setup/continue actions for that specific repo.  
+This is where per-project execution starts.
+
+![Screen D — Workspace actions expanded](docs/screenshots/04-workspace-actions-expanded.png)
+
+### Click order (simple and strict)
+
+| Order | Where to click | Why |
+|------|-----------------|-----|
+| **1** | Sidebar **Add folder in Finder** | Register roots so projects appear. |
+| **2** | Sidebar **Run setup script** | Run full setup path (Tunnel/GitHub/Agent). |
+| **3** | Expand **Quick check** | Confirm top-level integrations are healthy. |
+| **4** | Expand workspace row | Continue setup only for the target repo. |
+| **5** | **Refresh** | Re-sync statuses and running ports. |
+| **6** | Sidebar **Stop dashboard server** | Shut down cleanly when done. |
 
 ### Korean UI sample (same layout)
 
-The dashboard supports **KO / EN** toggle with the same structure and workflow.
+KO/EN toggle keeps the same layout and workflow.
 
 ![Dashboard — Korean overview](docs/screenshots/dashboard-ko.png)
 
-**Re-generate screenshots** (macOS + Google Chrome):
+**Re-generate README screenshots** (macOS + Google Chrome):
 
 ```bash
+./scripts/capture-dashboard-screenshots.sh
 ./scripts/capture-readme-screenshots.sh --auto-start
 ```
 
@@ -73,13 +80,13 @@ flowchart LR
   S2 --> S3["3 · Dashboard\nhttp://127.0.0.1:port"]
 ```
 
-### Reading the screenshots (same layout in EN / KO)
+### Reading the first page quickly
 
-- **Top pills (e.g. “Tunnel · GitHub · Agent CLI · Worker”)** — One-glance **quick check** of the four big integrations. Green means the dashboard considers that piece in a good state; follow the main cards or sidebar if something needs action.
-- **Search** — Filters the project list by **name or path** when you have many folders.
-- **Favorites** — Pinned projects; **Running** and a **port** (e.g. `5173`) appear when `workspace-services.jsonl` (or the UI) knows your dev server port — see [Per-project dev commands & ports](#per-project-dev-commands--ports).
-- **Other projects** — Additional discovered workspaces below favorites.
-- **Refresh** — Regenerates status from disk and listening ports without restarting the server.
+- **Sidebar step 1**: workspace root registration (`workspaces.txt` source).  
+- **Sidebar step 2**: full setup entrypoint in Terminal.  
+- **Quick check**: health summary for Tunnel/GitHub/Agent/Worker.  
+- **Workspace row fold**: per-project action menu and details.  
+- **Refresh**: status/port rescan without restarting.
 
 ---
 
@@ -113,13 +120,19 @@ flowchart LR
 
 ## Concept: how the pieces fit together
 
-The default entrypoint starts a **small Python HTTP server** on your Mac. Your browser talks to **localhost** only. When you click actions, **Terminal** runs the same `setup` script for a chosen folder; the script is idempotent-ish: it skips steps that already look done.
+The default entrypoint starts a **small Python HTTP server** on your Mac and binds to **`127.0.0.1`** by default.  
+When you click actions, **Terminal** runs the same `setup` script for a chosen folder; the script is idempotent-ish: it skips steps that already look done.  
+If you need cross-device access on a trusted network, opt in with `CURSOR_DASH_LAN=1`.
 
 ```mermaid
 flowchart TB
   subgraph User["You"]
     B[Browser]
     T[Terminal.app]
+  end
+
+  subgraph OptionalLAN["Optional LAN client"]
+    OB[Other device browser]
   end
 
   subgraph Local["Your Mac — local only"]
@@ -136,6 +149,7 @@ flowchart TB
   end
 
   B -->|http://127.0.0.1:port| D
+  OB -.->|LAN opt-in only| D
   D -->|opens| T
   T --> S
   S --> L
@@ -219,6 +233,12 @@ Actions (labels depend on locale) let you **open the folder in Finder**, **copy 
 3. Open the URL printed in the terminal (usually `http://127.0.0.1:`*port*) — the same address appears under **Step 3** in the sidebar.
 
 4. Follow the sidebar order: **folders → setup script → use the dashboard**. To configure one project, find it in the list and use **Continue setup** (or equivalent) so Terminal runs only what is still missing for that folder.
+
+**Optional (trusted LAN only):**
+
+```bash
+CURSOR_DASH_LAN=1 ./setup
+```
 
 **Full terminal wizard** (no dashboard):
 
