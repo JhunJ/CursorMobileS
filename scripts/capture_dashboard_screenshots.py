@@ -171,7 +171,14 @@ def main() -> int:
             pass
         snap(page, "03-other-projects-expanded.png")
 
-        # Intentionally stop at A/B/C core flow for README brevity.
+        # Workspace actions fold (single D screen only; no secondary detail screen)
+        rf = page.locator("details.repo-fold summary.repo-fold-summary").first
+        try:
+            rf.click(timeout=5000)
+            page.wait_for_timeout(500)
+        except Exception:
+            pass
+        snap(page, "04-workspace-actions-expanded.png")
 
         browser.close()
 

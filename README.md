@@ -41,6 +41,13 @@ If a project is missing, go back to sidebar step **1** (`Add folder in Finder`).
 
 ![Screen C — Other projects expanded](docs/screenshots/03-other-projects-expanded.png)
 
+### Screen D — Workspace actions expanded
+
+Open a workspace row to reveal per-project action buttons.  
+Use this for **continue setup** and project-specific execution.
+
+![Screen D — Workspace actions expanded](docs/screenshots/04-workspace-actions-expanded.png)
+
 ### Click order (simple and strict)
 
 | Order | Where to click | Why |
