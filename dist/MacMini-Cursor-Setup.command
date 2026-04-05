@@ -1447,16 +1447,6 @@ html_escape() {
   printf '%s' "${1:-}" | sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g' -e 's/"/\&quot;/g'
 }
 
-# macOS: 사이드바 LAN 주소 표시용 (en0 → en1 → en2)
-dashboard_primary_ipv4() {
-  local ifn ip
-  for ifn in en0 en1 en2; do
-    ip="$(ipconfig getifaddr "$ifn" 2>/dev/null)" || true
-    [[ -n "$ip" ]] && printf '%s' "$ip" && return
-  done
-  printf ''
-}
-
 _dashboard_card() {
   local dot_class="$1"
   local title="$2"
@@ -1698,13 +1688,7 @@ _dashboard_sidebar_locale_body_html() {
     printf '        <p class="step-desc">%s</p>\n' "$(_d "같은 주소로 다시 열 수 있습니다. 끝나면 서버를 꺼도 됩니다." "You can reopen this address anytime. Stop the server when you are done.")"
     printf '        <p style="margin:0 0 8px;font-size:12px"><a class="side-dash-url mono" href="http://127.0.0.1:%s/">127.0.0.1:%s</a></p>\n' "$(html_escape "$dash_port")" "$(html_escape "$dash_port")"
     if [[ "${CURSOR_DASH_HOST:-127.0.0.1}" == "0.0.0.0" || "${CURSOR_DASH_HOST:-}" == "::" ]]; then
-      local _lip
-      _lip="$(dashboard_primary_ipv4)"
-      if [[ -n "$_lip" ]]; then
-        printf '        <p style="margin:0 0 8px;font-size:12px"><a class="side-dash-url mono" href="http://%s:%s/">%s:%s</a> <span class="small">%s</span></p>\n' \
-          "$(html_escape "$_lip")" "$(html_escape "$dash_port")" "$(html_escape "$_lip")" "$(html_escape "$dash_port")" \
-          "$(_d "(LAN · 이 맥 IPv4)" "(LAN · this Mac IPv4)")"
-      fi
+      printf '        <p class="small" style="margin:0 0 8px">%s</p>\n' "$(_d "LAN 주소는 이 맥 터미널 출력만 보세요." "For LAN, use the URL printed in this Mac’s terminal only.")"
     fi
     printf '        <form method="post" action="/dashboard-stop" class="choice-form"><button type="submit" class="btn-choice"><span class="btn-choice-main"><span>%s</span><span class="btn-choice-sub">%s</span></span><span class="chev">›</span></button></form>\n' "$(_d "대시보드 서버 끄기" "Stop dashboard server")" ""
     printf '      </div>\n'
